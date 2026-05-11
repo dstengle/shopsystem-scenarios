@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "shopsystem_scenarios",
+  "project_id": "54b6f8f6-d16a-4a32-9e7f-8d8ad908044f"
+}
