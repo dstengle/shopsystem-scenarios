@@ -1,0 +1,9 @@
+Feature: shopsystem-scenarios — canonicalization and CLI contracts
+
+  @scenario_hash:4bd36d9830ee88b2 @bc:shopsystem-scenarios
+  Scenario: scenarios hash emits a 16-character hex hash for a well-formed scenario body
+  Given a Gherkin scenario body on stdin
+  When I run "scenarios hash"
+  Then the exit code is 0
+  And stdout is a single line of 16 lowercase hex characters
+  And stderr is empty
