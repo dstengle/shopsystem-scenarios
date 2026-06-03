@@ -26,6 +26,39 @@ Write the test first. Watch it fail. Write minimal code to pass.
 
 The only exception path is: emit `clarify` → await the lead's decision. No other path exists.
 
+## Staged-Commit Convention
+
+For each behavior, commit the cycle phases separately and with the prescribed
+prefixes. Frequent, staged commits are required — at minimum one RED commit
+and one GREEN commit per behavior:
+
+| Phase | Commit message | When to commit |
+|---|---|---|
+| RED | `test(red): <behavior>` | After writing the failing test, before any implementation |
+| GREEN | `feat(green): <behavior>` | After the test passes with minimal implementation |
+| REFACTOR | `refactor: <behavior>` | After each clean-up pass (optional but encouraged) |
+
+**Never combine RED and GREEN into one commit.** The commit history is an
+observable artifact — the router's inter-layer gate and the work-done-gate
+both verify that `test(red): <behavior>` precedes `feat(green): <behavior>`
+in the work-branch history.
+
+Example (for behavior "empty email rejection"):
+
+```bash
+# After writing the failing test:
+git add tests/test_email.py
+git commit -m "test(red): empty email rejection"
+
+# After implementing the fix:
+git add src/email.py
+git commit -m "feat(green): empty email rejection"
+
+# Optional refactor:
+git add src/email.py
+git commit -m "refactor: empty email rejection"
+```
+
 ## The Two Loops
 
 A BC Implementer works against **two nested loops**, and TDD lives in the inner one.

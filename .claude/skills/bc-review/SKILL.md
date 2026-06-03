@@ -105,6 +105,37 @@ shop-msg respond work_done \
 
 Name the specific gap: quote the shortcut, name the failing adjacent case, or describe the step definition flaw. The implementer uses this as the input for a new implementation pass.
 
+## Observable-Artifact Checks (Checks 4–5)
+
+Before running the adversarial probes, the reviewer must run Checks 4 and 5
+from the `work-done-gate` skill (invoked via the Skill tool):
+
+**Check 4 (plan artifact):** bd sub-issues exist for the work_id and are
+closed, and at least one is an explicit failing-test (RED) sub-issue (title
+contains "write the failing test for" or similar). This confirms the
+implementer ran TDD planning, not ad-hoc coding.
+
+```bash
+bd show <work_id>   # all sub-issues must be closed; ≥1 RED sub-issue required
+```
+
+Absent → convert to `work_done --status blocked --summary "no bd plan sub-issues for <work_id>"`.
+
+**Check 5 (test-first artifact):** for each behavior, a `test(red):
+<behavior>` commit precedes its `feat(green): <behavior>` commit in the
+work-branch history.
+
+```bash
+git log --oneline bc/<work_id>   # test(red) must precede feat(green) per behavior
+```
+
+Absent or mis-ordered → convert to `work_done --status blocked --summary
+"no test-first commit sequence for <behavior>"`.
+
+The `work-done-gate` skill runs Checks 4 and 5 as part of its full gate sweep.
+The reviewer invokes `work-done-gate` after completing the adversarial probes
+(see FIRST ACTION in the reviewer shim).
+
 ## Anti-Rationalization
 
 | Thought | Reality |
@@ -113,3 +144,4 @@ Name the specific gap: quote the shortcut, name the failing adjacent case, or de
 | "The implementer is experienced — trust it." | Trust but verify. Read the diff. |
 | "Adjacent cases weren't assigned — not my problem." | Adjacent cases reveal whether the implementation is real. Probing them is the review. |
 | "I don't want to slow things down." | A blocked `work_done` now is faster than a production bug later. |
+| "The commits look fine from here." | Verify Check 5 via git log — don't assume the test-first sequence is there. |

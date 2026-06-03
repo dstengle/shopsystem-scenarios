@@ -7,9 +7,38 @@ description: Merges the work branch into the BC's main and pushes so the work_id
 
 ## Overview
 
-Before any `work_done` can be emitted, the implementation must be on `origin/main`. This skill performs that integration: merge the work branch into the BC's `main`, commit with the work_id in the message, and push.
+Before any `work_done` can be emitted, the implementation must be on `origin/main`. This skill performs that integration: merge (or squash) the work branch into the BC's `main`, commit with the work_id in the message, and push.
 
 **Pushing is not optional.** "BC role discipline does not push" is NOT a reason to skip this step. Pushing is part of the work — the `work-done-gate` checks reachability from `origin/main` and will emit `--status blocked` if the commit is not there.
+
+### Squash Policy and Staged-Commit Preservation
+
+When the integration strategy is a squash merge, the squash commit **body must
+enumerate the staged commits** from the work branch, so the test-first sequence
+survives the squash:
+
+```
+feat: <summary> (work_id: <work_id>)
+
+Staged commits from bc/<work_id>:
+- test(red): <behavior A>
+- feat(green): <behavior A>
+- test(red): <behavior B>
+- feat(green): <behavior B>
+- refactor: <behavior B>
+
+work_id: <work_id>
+```
+
+The reviewer reads the pre-squash **branch** history for the test-first gate
+(verifying `test(red)` precedes `feat(green)` per behavior). The squash commit
+body provides an audit trail in `origin/main` even after the branch is deleted.
+
+To enumerate the staged commits for the squash body:
+
+```bash
+git log --oneline bc/<work_id> ^main   # list commits unique to the work branch
+```
 
 ## Protocol
 

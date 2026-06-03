@@ -16,64 +16,162 @@ This ensures:
 
 ## Plan Structure
 
-### One Sub-Issue Per Behavior
+### Check for an Existing Plan First (idempotency)
 
-Decompose the assigned scenario(s) into the behaviors that must be built or changed to make them pass. Each discrete behavior becomes **one `bd` sub-issue** of the lead bead.
+**Before creating any sub-issue, inspect the lead bead for a decomposition
+that already exists.** Planning is idempotent: a `work_id` is decomposed
+**once**. If a plan step is re-entered — a retried dispatch, a context reset
+mid-plan, or a re-invocation of this skill — it MUST adopt the existing
+sub-issues, not create a parallel set.
 
-- Sub-issue title: name the behavior, not the implementation ("validate empty email input" not "add if-statement to submit_form").
-- Sub-issue description: note which assigned scenario(s) this behavior serves.
-- Sub-issue scope: one TDD inner loop per sub-issue.
+```bash
+bd show <work_id>     # surfaces the full sub-issue tree, if any
+```
+
+- **No sub-issues exist** → proceed to decompose (below).
+- **A complete RED/GREEN decomposition already exists** → adopt it. Do NOT
+  create new sub-issues; continue execution against the existing IDs.
+- **A partial/inconsistent decomposition exists** (some pairs missing a leg,
+  or an abandoned earlier attempt) → reconcile in place: add only the
+  missing legs/edges, or close the stragglers with a `--reason` naming the
+  surviving plan. Never leave two sub-issues that decompose the *same*
+  behavior — that is the duplicate-plan failure mode the reviewer's
+  work-done-gate (bd-plan check) blocks on.
+
+A behavior is "already planned" when a RED ("write the failing test for
+`<behavior>`") and its GREEN ("implement `<behavior>`") sub-issue already
+exist under this `work_id`. Match on the behavior the title names, not on a
+freshly minted ID.
+
+### Two Sub-Issues Per Behavior: RED and GREEN
+
+For each discrete behavior that must be built to make the assigned scenario(s)
+pass, create **two** bd sub-issues of the lead bead:
+
+1. **RED sub-issue** — "write the failing test for `<behavior>`"
+   - This sub-issue is complete when the failing test is committed as
+     `test(red): <behavior>` and the test suite confirms the test fails for
+     the right reason.
+
+2. **GREEN sub-issue** — "implement `<behavior>`"
+   - This sub-issue is complete when the implementation is committed as
+     `feat(green): <behavior>` and the test is passing.
+
+Then add a dependency so the GREEN sub-issue cannot start until the RED
+sub-issue is closed:
+
+```bash
+bd dep add <green_id> <red_id>
+```
+
+This dependency DAG is the enforcement point for test-first order. The router
+reads it via `bd ready` to know which sub-issues are unblocked and can be
+dispatched.
+
+**Naming convention:**
+- RED: "write the failing test for <behavior>" — e.g. "write the failing test for empty email rejection"
+- GREEN: "implement <behavior>" — e.g. "implement empty email rejection"
+- GREEN's description: note which RED sub-issue it unblocks from, and which assigned scenario(s) it serves.
 
 ### BDD Outer Loop Preservation
 
-The assigned Gherkin scenario(s) are the **BDD outer loop** — they pin what `work_done` proves. Decomposition must not change what that proof is.
+The assigned Gherkin scenario(s) are the **BDD outer loop** — they pin what
+`work_done` proves. Decomposition must not change what that proof is.
 
-Concretely: you may decompose into as many sub-issues as needed, but every sub-issue must exist in service of making the assigned scenario(s) pass. You may NOT:
+Concretely: you may decompose into as many RED/GREEN sub-issue pairs as
+needed, but every sub-issue must exist in service of making the assigned
+scenario(s) pass. You may NOT:
 - Rewrite or reinterpret a scenario's Given/When/Then to fit your decomposition.
 - Declare the outer loop satisfied by a subset of the assigned scenarios.
 - Add net-new scenarios to `features/` that were not assigned.
 
+### Cross-Behavior Dependencies
+
+When behavior B depends on behavior A (e.g. B builds on an abstraction A
+introduces), encode that as `bd dep` edges in addition to the RED/GREEN edges:
+
+```bash
+# A's GREEN must be closed before B's RED can start
+bd dep add <B_red_id> <A_green_id>
+```
+
+This forms an explicit DAG. The router dispatches any sub-issue with no open
+blockers (`bd ready`) — independent RED sub-issues at the same layer are
+dispatched **in parallel** to bc-implementer subagents. Dependent sub-issues
+wait until all their blockers are closed.
+
 ## `bd` Commands
 
 ```bash
-# Create a sub-issue and link it as a child of the lead bead
-bd create "validate empty email input" --parent <work_id>
-bd dep add <sub_id> --parent <work_id>     # if created separately
+# FIRST: check for an existing decomposition — never create blind
+bd show <work_id>            # adopt existing sub-issues if present
+
+# Create the RED sub-issue (only if this behavior is not already planned)
+bd create "write the failing test for <behavior>" --parent <work_id>
+# → prints <red_id>
+
+# Create the GREEN sub-issue
+bd create "implement <behavior>" --parent <work_id>
+# → prints <green_id>
+
+# Add RED→GREEN dependency: GREEN waits for RED
+bd dep add <green_id> <red_id>
+
+# For cross-behavior deps: B's RED waits for A's GREEN
+bd dep add <B_red_id> <A_green_id>
 
 # Mark claimed and in-progress as you work each behavior
 bd update <sub_id> --claim
 bd update <sub_id> --status in_progress
 
-# Close when the behavior is TDD-complete and the inner loop is green
+# Close when complete (RED: failing test committed; GREEN: impl + passing)
 bd close <sub_id>
+
+# Check what's ready (no open blockers) — used by the router dispatch loop
+bd ready
 ```
 
-`bd dep add` establishes the parent-child relationship so `bd show <work_id>` surfaces the full decomposition tree.
+`bd dep add` establishes the parent-child relationship so `bd show <work_id>`
+surfaces the full decomposition tree with dependency edges.
 
 ## Workflow
 
 ```dot
 digraph bdd_plan {
     rankdir=TB;
-    assign [label="Receive assign_scenarios\nor bugfix w/ scenarios", shape=box];
-    read   [label="Read scenario(s) carefully", shape=box];
-    decomp [label="Decompose into behaviors\n(one bd sub-issue each)", shape=box];
-    loop   [label="Work each sub-issue\nvia TDD inner loop", shape=box];
-    outer  [label="Run assigned Gherkin\nscenario(s) — must pass", shape=diamond];
-    gate   [label="Hand off to bc-reviewer", shape=box];
+    assign  [label="Receive assign_scenarios\nor bugfix w/ scenarios", shape=box];
+    read    [label="Read scenario(s) carefully", shape=box];
+    existing [label="bd show <work_id>\nPlan already exists?", shape=diamond];
+    decomp  [label="Decompose into behaviors\n(RED + GREEN sub-issues per behavior,\nbd dep edges for order)", shape=box];
+    adopt   [label="Adopt / reconcile\nexisting sub-issues\n(no duplicate pairs)", shape=box];
+    ready   [label="bd ready\n→ dispatch all unblocked sub-issues\nIN PARALLEL to bc-implementer", shape=box];
+    loop    [label="Each bc-implementer: TDD inner loop\ntest(red) commit → feat(green) commit", shape=box];
+    gate    [label="Gate: all dispatched sub-issues closed?\ntest(red) precedes feat(green)?", shape=diamond];
+    outer   [label="Run assigned Gherkin\nscenario(s) — must pass", shape=diamond];
+    review  [label="Hand off to bc-reviewer", shape=box];
 
-    assign -> read -> decomp -> loop -> outer;
-    outer  -> gate [label="pass"];
-    outer  -> loop [label="fail: revisit sub-issue"];
+    assign -> read -> existing;
+    existing -> decomp [label="no"];
+    existing -> adopt  [label="yes"];
+    decomp -> ready;
+    adopt  -> ready;
+    ready  -> loop -> gate;
+    gate   -> ready  [label="no: wait for layer"];
+    gate   -> outer  [label="DAG drained"];
+    outer  -> review [label="pass"];
+    outer  -> ready  [label="fail: reopen sub-issue"];
 }
 ```
 
 ## Rules
 
 1. **No plan document.** Do not create a PLAN.md, TODO.md, or any markdown planning artifact. The bd registry is the single source of truth for decomposition.
-2. **Sub-issues only.** Do not use `TodoWrite`, inline checklists, or scratch notes for tracking. If it's work, it's a bead.
-3. **Close sub-issues promptly.** Close each sub-issue when its TDD inner loop is complete and its tests pass. Do not batch-close at the end.
-4. **The outer loop is immutable.** The assigned scenario(s) are fixed. You build to them; you do not negotiate them during implementation.
+2. **Two sub-issues per behavior.** Every behavior gets one RED ("write the failing test for <behavior>") and one GREEN ("implement <behavior>") sub-issue, with `bd dep add <green> <red>`.
+3. **Sub-issues only.** Do not use `TodoWrite`, inline checklists, or scratch notes for tracking. If it's work, it's a bead.
+4. **Close sub-issues promptly.** Close each sub-issue when its TDD phase is complete. Do not batch-close at the end.
+5. **The outer loop is immutable.** The assigned scenario(s) are fixed. You build to them; you do not negotiate them during implementation.
+6. **Parallel dispatch.** Sub-issues with no open blockers (`bd ready`) are dispatched together, in parallel, by the router. Dependent sub-issues wait for all their blockers to close before being dispatched.
+7. **Plan once — idempotent decomposition.** Before creating any sub-issue, run `bd show <work_id>` and adopt any existing decomposition. Never create a second RED/GREEN pair for a behavior that is already planned. A re-entered plan step reconciles; it does not duplicate. Two sub-issues decomposing the same behavior is a defect the work-done-gate blocks on.
 
 ## Sizing Sub-Issues
 

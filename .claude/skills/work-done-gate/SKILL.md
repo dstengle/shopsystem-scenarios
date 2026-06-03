@@ -80,6 +80,57 @@ Evidence on failure: name the mismatched or missing hash, the path searched, and
 blocked: scenario_hash <hash> not found in features/ (searched: features/; origin/main: <sha>). Scenario may not be pinned.
 ```
 
+### Check 4: BD Plan Sub-Issues Present and Closed
+
+Verify that bd sub-issues exist for the work_id and that they are all closed.
+Specifically, at least one sub-issue must be an explicit failing-test (RED)
+sub-issue (title contains "write the failing test for" or similar RED
+nomenclature).
+
+```bash
+bd show <work_id>   # inspect sub-issues: status and titles
+```
+
+**Pass:** at least one RED sub-issue exists and all sub-issues are closed.
+
+**Fail:** no sub-issues exist for the work_id, or sub-issues are not all
+closed, or no RED (failing-test) sub-issue is present.
+
+Evidence on failure: list the open sub-issues and note the missing RED
+sub-issue. Block with message:
+```
+blocked: no bd plan sub-issues for <work_id>
+```
+or:
+```
+blocked: bd sub-issue(s) not closed for <work_id>: <list>
+```
+
+### Check 5: Test-First Artifact in Work-Branch History
+
+For each behavior, verify that a `test(red): <behavior>` commit precedes its
+`feat(green): <behavior>` commit in the work-branch history:
+
+```bash
+git log --oneline bc/<work_id>   # inspect commit sequence
+```
+
+For each behavior, locate the `test(red)` commit and the `feat(green)` commit.
+The `test(red)` commit must appear **earlier** in the log (i.e., was authored
+before the `feat(green)` commit).
+
+**Pass:** for every behavior with a `feat(green)` commit, a `test(red)` commit
+for the same behavior appears before it in the branch history.
+
+**Fail:** any `feat(green)` commit has no corresponding `test(red)` commit, or
+the `test(red)` commit appears after `feat(green)`.
+
+Evidence on failure: name the behavior, the `feat(green)` commit SHA, and
+the missing or mis-ordered `test(red)` commit. Block with message:
+```
+blocked: no test-first commit sequence for <behavior>
+```
+
 ## Gate Summary Table
 
 | Check | Command | Pass condition | Fail → blocked evidence |
@@ -87,6 +138,8 @@ blocked: scenario_hash <hash> not found in features/ (searched: features/; origi
 | Clean working tree | `git status --porcelain` | empty output | dirty paths list |
 | work_id reachable | `git fetch origin && git log origin/main --oneline \| grep <work_id>` | grep matches | work_id + origin/main HEAD SHA |
 | Scenario hash subset | `scenarios hash` + `git grep` | all hashes in features/ | mismatched hash + path + SHA |
+| BD plan sub-issues | `bd show <work_id>` | sub-issue(s) exist, all closed, ≥1 RED | "no bd plan sub-issues for <work_id>" |
+| Test-first artifact | `git log --oneline bc/<work_id>` | test(red) precedes feat(green) per behavior | "no test-first commit sequence for <behavior>" |
 
 ## Failure Converts Complete to Blocked
 
