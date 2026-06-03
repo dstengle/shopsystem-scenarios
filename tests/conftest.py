@@ -763,3 +763,88 @@ def then_stdout_line_is_scenario_title(
         f"expected {ordinal} line to be {context['titles'][idx]!r}; "
         f"got {lines[idx]!r}; full stdout:\n{context['cli_stdout']}"
     )
+
+
+# =======================================================================
+# tags_cli.feature — `scenarios tags FILE` reads a feature file and emits
+# the DISTINCT @-tags carried by its scenarios, one tag per line. Invoked
+# via subprocess (the same boundary downstream callers use), reusing the
+# shared exit-code/stderr Then steps. The distinguishing property is
+# de-duplication: a tag carried by more than one scenario appears exactly
+# ONCE in the output, so the fixture deliberately repeats one tag and the
+# Then step asserts a multiset count of exactly one per distinct tag.
+# =======================================================================
+
+
+@given(
+    "a feature file whose scenarios carry two distinct @-tags, "
+    "one of them repeated"
+)
+def given_feature_file_with_repeated_tag(context: dict, tmp_path) -> None:
+    # Two scenarios. A shared @-tag (@smoke) is carried by both — the
+    # repeated tag — and a second @-tag (@slow) is carried by only the
+    # second scenario. The distinct set is therefore {@smoke, @slow}, each
+    # of which `scenarios tags` must emit exactly once even though @smoke
+    # appears twice in the file. @scenario_hash tags are intentionally
+    # NOT among the expected output (they are hash plumbing, not semantic
+    # @-tags) — but the fixture omits them entirely so this scenario stays
+    # honest to its prose, which speaks only of the two distinct @-tags.
+    expected_tags = ["@slow", "@smoke"]
+    assert expected_tags[0] != expected_tags[1], (
+        "fixture invariant: the two distinct tags collided"
+    )
+
+    feature_text = (
+        "Feature: a fixture feature whose scenarios carry @-tags\n\n"
+        "  @smoke\n"
+        "  Scenario: First tagged scenario\n"
+        "    Given a precondition\n"
+        "    Then an outcome holds\n\n"
+        "  @smoke @slow\n"
+        "  Scenario: Second tagged scenario\n"
+        "    Given another precondition\n"
+        "    Then a different outcome holds\n"
+    )
+    feature_path = tmp_path / "tagged_scenarios.feature"
+    feature_path.write_text(feature_text, encoding="utf-8")
+    context["feature_file"] = feature_path
+    # Sorted, since the Then step compares as a de-duplicated set.
+    context["expected_tags"] = sorted(expected_tags)
+
+
+@when(parsers.parse('I run "scenarios tags" against that feature file'))
+def when_run_scenarios_tags(context: dict) -> None:
+    result = subprocess.run(
+        ["scenarios", "tags", str(context["feature_file"])],
+        capture_output=True,
+        text=True,
+    )
+    context["cli_returncode"] = result.returncode
+    context["cli_stdout"] = result.stdout
+    context["cli_stderr"] = result.stderr
+
+
+@then("stdout lists each distinct @-tag exactly once, one tag per line")
+def then_stdout_lists_distinct_tags_once(context: dict) -> None:
+    lines = context["cli_stdout"].splitlines()
+    # One tag per line: every emitted line is a single @-token with no
+    # surrounding whitespace or embedded separators.
+    for line in lines:
+        assert line.startswith("@"), (
+            f"expected each line to be a single @-tag; got {line!r}; "
+            f"full stdout:\n{context['cli_stdout']}"
+        )
+        assert line == line.strip() and " " not in line, (
+            f"expected one bare @-tag per line; got {line!r}"
+        )
+    # Exactly once: no duplicates in the output, even though the fixture
+    # repeats a tag across scenarios.
+    assert len(lines) == len(set(lines)), (
+        f"expected each distinct @-tag exactly once; got duplicates in:\n"
+        f"{context['cli_stdout']}"
+    )
+    # The emitted set equals the expected distinct set (order-independent).
+    assert sorted(lines) == context["expected_tags"], (
+        f"expected distinct tags {context['expected_tags']!r}; "
+        f"got {sorted(lines)!r}; full stdout:\n{context['cli_stdout']}"
+    )
