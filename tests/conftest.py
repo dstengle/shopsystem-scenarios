@@ -530,3 +530,95 @@ def then_dispatch_step_references_secret(secret: str, context: dict) -> None:
         f"dispatch step does not reference the secret {secret!r} "
         f"(expected a ${{{{ {needle} }}}} reference); step was:\n{step_text}"
     )
+
+
+# =======================================================================
+# list_cli.feature — `scenarios list FILE` reads a feature file and emits
+# one line per scenario pairing the scenario title with the value of the
+# @scenario_hash tag that precedes it. Invoked via subprocess (the same
+# boundary downstream callers use), reusing the shared exit-code/stderr
+# Then steps.
+# =======================================================================
+
+
+_FIRST_SCENARIO_BODY = (
+    "Scenario: First listed scenario\n"
+    "    Given a precondition\n"
+    "    When an action occurs\n"
+    "    Then an outcome holds"
+)
+_SECOND_SCENARIO_BODY = (
+    "Scenario: Second listed scenario\n"
+    "    Given another precondition\n"
+    "    When a different action occurs\n"
+    "    Then a different outcome holds"
+)
+
+
+@given(
+    "a feature file containing two scenarios, each preceded by a "
+    '"@scenario_hash:" tag line carrying that scenario\'s hash'
+)
+def given_feature_file_with_two_hashed_scenarios(context: dict, tmp_path) -> None:
+    # Use the scenarios' real canonical hashes for the tag values so the
+    # fixture is internally honest: the @scenario_hash tag really is the
+    # hash of the body it precedes. `scenarios list` echoes the tag value
+    # verbatim, so the test still passes regardless, but an honest fixture
+    # documents intent and would catch a parser that recomputed instead of
+    # reading the tag.
+    titles = ["First listed scenario", "Second listed scenario"]
+    hashes = [
+        compute_scenario_hash(_FIRST_SCENARIO_BODY),
+        compute_scenario_hash(_SECOND_SCENARIO_BODY),
+    ]
+    # Distinct hashes guard against a fixture where both lines would pass
+    # the "title + hash on one line" check by coincidence.
+    assert hashes[0] != hashes[1], "fixture invariant: scenario hashes collided"
+
+    def _indent(body: str) -> str:
+        return "\n".join("  " + line for line in body.splitlines())
+
+    feature_text = (
+        "Feature: a fixture feature with two hashed scenarios\n\n"
+        f"  @scenario_hash:{hashes[0]}\n"
+        f"{_indent(_FIRST_SCENARIO_BODY)}\n\n"
+        f"  @scenario_hash:{hashes[1]}\n"
+        f"{_indent(_SECOND_SCENARIO_BODY)}\n"
+    )
+    feature_path = tmp_path / "two_scenarios.feature"
+    feature_path.write_text(feature_text, encoding="utf-8")
+    context["feature_file"] = feature_path
+    context["titles"] = titles
+    context["hashes"] = hashes
+
+
+@when(parsers.parse('I run "scenarios list" against that feature file'))
+def when_run_scenarios_list(context: dict) -> None:
+    result = subprocess.run(
+        ["scenarios", "list", str(context["feature_file"])],
+        capture_output=True,
+        text=True,
+    )
+    context["cli_returncode"] = result.returncode
+    context["cli_stdout"] = result.stdout
+    context["cli_stderr"] = result.stderr
+
+
+_ORDINALS = {"first": 0, "second": 1}
+
+
+@then(
+    parsers.parse(
+        "stdout contains a line pairing the {ordinal} scenario's title "
+        "with its @scenario_hash value"
+    )
+)
+def then_stdout_pairs_title_and_hash(ordinal: str, context: dict) -> None:
+    idx = _ORDINALS[ordinal]
+    title = context["titles"][idx]
+    scenario_hash = context["hashes"][idx]
+    lines = context["cli_stdout"].splitlines()
+    assert any(title in line and scenario_hash in line for line in lines), (
+        f"expected a stdout line pairing title {title!r} with hash "
+        f"{scenario_hash!r}; stdout was:\n{context['cli_stdout']}"
+    )
