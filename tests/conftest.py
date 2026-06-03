@@ -11,10 +11,13 @@ tmp_path fixtures, with the `context` dict carrying cross-step state.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 import subprocess
+from pathlib import Path
 
 import pytest
+import yaml
 from pytest_bdd import given, parsers, then, when
 
 from scenarios.hash import compute_scenario_hash
@@ -366,4 +369,164 @@ def then_hash_is_expected(expected_hash: str, context: dict) -> None:
     actual = context["reference_hash"]
     assert actual == expected_hash, (
         f"expected reference hash {expected_hash!r}; got {actual!r}"
+    )
+
+
+# =======================================================================
+# release_workflow.feature — the BC's own release pipeline fans out a
+# repository_dispatch to bc-launcher on a version-tag release. Unlike the
+# CLI/canonicalization scenarios this pins a property of a shipped
+# artifact (the workflow YAML), so the steps read .github/workflows/ from
+# disk and assert structurally rather than exercising runtime behaviour.
+# =======================================================================
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
+_DISPATCH_TARGET = "dstengle/shopsystem-bc-launcher"
+_DISPATCH_TOKEN_SECRET = "BC_LAUNCHER_DISPATCH_TOKEN"
+
+
+def _workflow_triggers(parsed: dict) -> dict:
+    # PyYAML parses the bare key `on` as the boolean True — YAML 1.1
+    # treats on/off/yes/no as booleans — so a GitHub Actions `on:` block
+    # lands under the True key, not the string "on". Accept either form.
+    if not isinstance(parsed, dict):
+        return {}
+    for key in ("on", True):
+        if key in parsed:
+            return parsed[key] or {}
+    return {}
+
+
+def _push_tag_patterns(parsed: dict) -> list[str]:
+    push = _workflow_triggers(parsed).get("push")
+    if not isinstance(push, dict):
+        return []
+    tags = push.get("tags")
+    if isinstance(tags, str):
+        return [tags]
+    if isinstance(tags, list):
+        return [t for t in tags if isinstance(t, str)]
+    return []
+
+
+def _iter_steps(parsed: dict):
+    if not isinstance(parsed, dict):
+        return
+    for job in (parsed.get("jobs") or {}).values():
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps") or []:
+            if isinstance(step, dict):
+                yield step
+
+
+def _step_targets_dispatch(step: dict) -> bool:
+    """True if the step performs a repository_dispatch to the bc-launcher
+    repo, satisfied by either the peter-evans action or a raw REST call to
+    the GitHub repository-dispatches API (the two forms the scenario
+    permits)."""
+    uses = str(step.get("uses") or "")
+    if uses.startswith("peter-evans/repository-dispatch"):
+        with_block = step.get("with") or {}
+        return str(with_block.get("repository") or "") == _DISPATCH_TARGET
+    run = str(step.get("run") or "")
+    if run:
+        text = run.lower()
+        hits_api = "dispatches" in text and (
+            "api.github.com" in text or "gh api" in text
+        )
+        return hits_api and _DISPATCH_TARGET in run
+    return False
+
+
+@given("the shopsystem-scenarios framework-utility source repository")
+def given_source_repository(context: dict) -> None:
+    # The repository under test is this checkout; the scenario inspects
+    # the artifacts it ships rather than any installed package.
+    assert _REPO_ROOT.is_dir(), f"repo root not found: {_REPO_ROOT}"
+    context["repo_root"] = _REPO_ROOT
+
+
+@when(parsers.parse('its release workflow file under "{workflows_dir}" is inspected'))
+def when_inspect_workflow_files(workflows_dir: str, context: dict) -> None:
+    # Load every workflow definition under .github/workflows/ so the Then
+    # steps can select the release workflow by its trigger rather than by
+    # a hard-coded filename. The path comes from the Gherkin so the step
+    # and the prose stay in sync.
+    target_dir = context["repo_root"] / workflows_dir
+    assert target_dir.is_dir(), (
+        f"expected a workflows directory at {target_dir}; none found"
+    )
+    workflows = []
+    for path in sorted(target_dir.glob("*.y*ml")):
+        raw = path.read_text(encoding="utf-8")
+        workflows.append((path, raw, yaml.safe_load(raw)))
+    assert workflows, f"no workflow files found under {target_dir}"
+    context["workflows"] = workflows
+
+
+@then(parsers.parse('the workflow declares a trigger on push of tags matching "{pattern}"'))
+def then_workflow_triggers_on_tag_push(pattern: str, context: dict) -> None:
+    # The release workflow is the one whose push.tags would match a
+    # v-prefixed version tag (e.g. v1.2.3) via the declared glob. Select
+    # it here so the remaining Then steps inspect that same workflow.
+    matches = []
+    for path, raw, parsed in context["workflows"]:
+        for tag_glob in _push_tag_patterns(parsed):
+            if tag_glob == pattern and fnmatch.fnmatch("v1.2.3", tag_glob):
+                matches.append((path, raw, parsed))
+                break
+    assert matches, (
+        f"no workflow under .github/workflows/ declares a push trigger on "
+        f"tags matching {pattern!r}; "
+        f"inspected: {[p.name for p, _, _ in context['workflows']]}"
+    )
+    assert len(matches) == 1, (
+        f"expected exactly one release workflow with a {pattern!r} tag "
+        f"trigger; found {[p.name for p, _, _ in matches]}"
+    )
+    context["release_workflow"] = matches[0]
+
+
+@then(
+    parsers.parse(
+        'the workflow contains a step that performs a "{dispatch_type}" '
+        'targeting the "{target}" repository, satisfied by either a REST '
+        "call to the GitHub repository-dispatches API or a use of the "
+        '"{action}" action'
+    )
+)
+def then_workflow_dispatches_to_target(
+    dispatch_type: str, target: str, action: str, context: dict
+) -> None:
+    assert dispatch_type == "repository_dispatch", dispatch_type
+    assert target == _DISPATCH_TARGET, target
+    _, _, parsed = context["release_workflow"]
+    dispatch_steps = [s for s in _iter_steps(parsed) if _step_targets_dispatch(s)]
+    assert dispatch_steps, (
+        f"release workflow declares no step performing a {dispatch_type} to "
+        f"{target!r} (via the {action!r} action or a REST call to the "
+        "repository-dispatches API)"
+    )
+    assert len(dispatch_steps) == 1, (
+        f"expected exactly one dispatch step targeting {target!r}; "
+        f"found {len(dispatch_steps)}"
+    )
+    context["dispatch_step"] = dispatch_steps[0]
+
+
+@then(parsers.parse('that step references the secret "{secret}" as the dispatch token'))
+def then_dispatch_step_references_secret(secret: str, context: dict) -> None:
+    assert secret == _DISPATCH_TOKEN_SECRET, secret
+    step = context["dispatch_step"]
+    # Serialise the matched step back to text so the assertion covers the
+    # secret reference wherever it lives — `with.token` for the action
+    # form, or an Authorization header / env var for the REST form.
+    step_text = yaml.safe_dump(step)
+    needle = f"secrets.{secret}"
+    assert needle in step_text, (
+        f"dispatch step does not reference the secret {secret!r} "
+        f"(expected a ${{{{ {needle} }}}} reference); step was:\n{step_text}"
     )

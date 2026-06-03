@@ -16,6 +16,7 @@ dev = [
     "pytest>=8",
     "pytest-bdd>=7",
     "gherkin-official",
+    "pyyaml",
 ]
 
 [project.urls]
