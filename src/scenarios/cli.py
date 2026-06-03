@@ -19,6 +19,10 @@ Subcommands:
     count [FILE]
         Reads a feature file (FILE, or stdin when omitted) and writes the
         number of scenarios it contains as a single line.
+    titles [FILE]
+        Reads a feature file (FILE, or stdin when omitted) and writes one
+        line per scenario carrying just that scenario's title, in file
+        order. Unlike ``list``, no @scenario_hash column is emitted.
 """
 from __future__ import annotations
 
@@ -48,9 +52,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _read_feature(args: argparse.Namespace) -> str:
-    # `list` and `count` share the same source contract: a positional FILE,
-    # or stdin when omitted. Keep that resolution in one place so the two
-    # subcommands cannot drift apart.
+    # `list`, `count`, and `titles` share the same source contract: a
+    # positional FILE, or stdin when omitted. Keep that resolution in one
+    # place so the subcommands cannot drift apart.
     if args.file is None:
         return sys.stdin.read()
     with open(args.file, encoding="utf-8") as handle:
@@ -69,6 +73,15 @@ def _cmd_list(args: argparse.Namespace) -> int:
 def _cmd_count(args: argparse.Namespace) -> int:
     count = sum(1 for _ in iter_scenarios(_read_feature(args)))
     print(count)
+    return 0
+
+
+def _cmd_titles(args: argparse.Namespace) -> int:
+    # One title per line, in file order. `titles` is the hash-free sibling
+    # of `list`: it discards the @scenario_hash column entirely, so the
+    # output is a clean title listing usable directly by downstream callers.
+    for _scenario_hash, title in iter_scenarios(_read_feature(args)):
+        print(title)
     return 0
 
 
@@ -116,6 +129,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="feature file to count; reads stdin when omitted",
     )
     count_cmd.set_defaults(func=_cmd_count)
+
+    titles_cmd = sub.add_parser(
+        "titles",
+        help="print each scenario's title, one per line, in file order",
+    )
+    titles_cmd.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="feature file to read; reads stdin when omitted",
+    )
+    titles_cmd.set_defaults(func=_cmd_titles)
 
     return parser
 
