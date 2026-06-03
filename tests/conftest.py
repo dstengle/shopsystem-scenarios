@@ -622,3 +622,52 @@ def then_stdout_pairs_title_and_hash(ordinal: str, context: dict) -> None:
         f"expected a stdout line pairing title {title!r} with hash "
         f"{scenario_hash!r}; stdout was:\n{context['cli_stdout']}"
     )
+
+
+# =======================================================================
+# count_cli.feature — `scenarios count FILE` prints the scenario count.
+# Reuses the shared exit-code/stderr Then steps; the count fixture needs
+# no @scenario_hash tags since counting is tag-independent.
+# =======================================================================
+
+
+@given("a feature file containing two scenarios")
+def given_feature_file_with_two_scenarios(context: dict, tmp_path) -> None:
+    # No @scenario_hash tags: `scenarios count` counts Scenario keywords
+    # regardless of tagging, and an untagged fixture keeps this scenario
+    # honest to its prose ("two scenarios", nothing about hashes).
+    feature_text = (
+        "Feature: a fixture feature with two scenarios\n\n"
+        "  Scenario: First\n"
+        "    Given a precondition\n"
+        "    Then an outcome holds\n\n"
+        "  Scenario: Second\n"
+        "    Given another precondition\n"
+        "    Then a different outcome holds\n"
+    )
+    feature_path = tmp_path / "two_scenarios_count.feature"
+    feature_path.write_text(feature_text, encoding="utf-8")
+    context["feature_file"] = feature_path
+
+
+@when(parsers.parse('I run "scenarios count" against that feature file'))
+def when_run_scenarios_count(context: dict) -> None:
+    result = subprocess.run(
+        ["scenarios", "count", str(context["feature_file"])],
+        capture_output=True,
+        text=True,
+    )
+    context["cli_returncode"] = result.returncode
+    context["cli_stdout"] = result.stdout
+    context["cli_stderr"] = result.stderr
+
+
+@then(parsers.parse('stdout is the single line "{value}"'))
+def then_stdout_is_single_line(value: str, context: dict) -> None:
+    stdout = context["cli_stdout"]
+    assert stdout.endswith("\n"), (
+        f"expected stdout to end with a newline; got {stdout!r}"
+    )
+    body = stdout[:-1]
+    assert "\n" not in body, f"expected a single line of output; got {stdout!r}"
+    assert body == value, f"expected stdout line {value!r}; got {body!r}"

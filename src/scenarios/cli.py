@@ -16,6 +16,9 @@ Subcommands:
         Reads a feature file (FILE, or stdin when omitted) and writes one
         ``<scenario_hash>\\t<title>`` line per scenario, pairing each
         scenario's title with the @scenario_hash tag value preceding it.
+    count [FILE]
+        Reads a feature file (FILE, or stdin when omitted) and writes the
+        number of scenarios it contains as a single line.
 """
 from __future__ import annotations
 
@@ -44,17 +47,28 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 1
 
 
-def _cmd_list(args: argparse.Namespace) -> int:
+def _read_feature(args: argparse.Namespace) -> str:
+    # `list` and `count` share the same source contract: a positional FILE,
+    # or stdin when omitted. Keep that resolution in one place so the two
+    # subcommands cannot drift apart.
     if args.file is None:
-        feature_text = sys.stdin.read()
-    else:
-        with open(args.file, encoding="utf-8") as handle:
-            feature_text = handle.read()
-    for scenario_hash, title in iter_scenarios(feature_text):
+        return sys.stdin.read()
+    with open(args.file, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _cmd_list(args: argparse.Namespace) -> int:
+    for scenario_hash, title in iter_scenarios(_read_feature(args)):
         # A scenario without a preceding @scenario_hash tag prints an empty
         # hash column rather than being dropped, so the listing stays a
         # faithful one-line-per-scenario view of the file.
         print(f"{scenario_hash or ''}\t{title}")
+    return 0
+
+
+def _cmd_count(args: argparse.Namespace) -> int:
+    count = sum(1 for _ in iter_scenarios(_read_feature(args)))
+    print(count)
     return 0
 
 
@@ -90,6 +104,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="feature file to list; reads stdin when omitted",
     )
     list_cmd.set_defaults(func=_cmd_list)
+
+    count_cmd = sub.add_parser(
+        "count",
+        help="print the number of scenarios in a feature file",
+    )
+    count_cmd.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="feature file to count; reads stdin when omitted",
+    )
+    count_cmd.set_defaults(func=_cmd_count)
 
     return parser
 
