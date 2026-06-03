@@ -671,3 +671,95 @@ def then_stdout_is_single_line(value: str, context: dict) -> None:
     body = stdout[:-1]
     assert "\n" not in body, f"expected a single line of output; got {stdout!r}"
     assert body == value, f"expected stdout line {value!r}; got {body!r}"
+
+
+# =======================================================================
+# titles_cli.feature — `scenarios titles FILE` reads a feature file and
+# emits one line per scenario carrying just the scenario title (no hash
+# column). Invoked via subprocess (the same boundary downstream callers
+# use), reusing the shared exit-code/stderr Then steps. The distinguishing
+# property from `scenarios list` is that titles emits ONLY the title — so
+# the per-ordinal Then steps assert the line EQUALS the title rather than
+# merely containing it, which would also pass for the tab-joined `list`
+# output.
+# =======================================================================
+
+
+@given("a feature file containing two scenarios with distinct titles")
+def given_feature_file_with_two_distinct_titles(context: dict, tmp_path) -> None:
+    # Two scenarios with deliberately different titles so an "each line is a
+    # title, in file order" contract is observable. @scenario_hash tags are
+    # present (and honest) but irrelevant to `titles`; including them guards
+    # against an implementation that accidentally leaks the hash into the
+    # title line.
+    titles = ["First titled scenario", "Second titled scenario"]
+    assert titles[0] != titles[1], "fixture invariant: scenario titles collided"
+
+    first_body = (
+        f"Scenario: {titles[0]}\n"
+        "    Given a precondition\n"
+        "    When an action occurs\n"
+        "    Then an outcome holds"
+    )
+    second_body = (
+        f"Scenario: {titles[1]}\n"
+        "    Given another precondition\n"
+        "    When a different action occurs\n"
+        "    Then a different outcome holds"
+    )
+    hashes = [
+        compute_scenario_hash(first_body),
+        compute_scenario_hash(second_body),
+    ]
+
+    def _indent(body: str) -> str:
+        return "\n".join("  " + line for line in body.splitlines())
+
+    feature_text = (
+        "Feature: a fixture feature with two distinctly titled scenarios\n\n"
+        f"  @scenario_hash:{hashes[0]}\n"
+        f"{_indent(first_body)}\n\n"
+        f"  @scenario_hash:{hashes[1]}\n"
+        f"{_indent(second_body)}\n"
+    )
+    feature_path = tmp_path / "two_titled_scenarios.feature"
+    feature_path.write_text(feature_text, encoding="utf-8")
+    context["feature_file"] = feature_path
+    context["titles"] = titles
+    context["hashes"] = hashes
+
+
+@when(parsers.parse('I run "scenarios titles" against that feature file'))
+def when_run_scenarios_titles(context: dict) -> None:
+    result = subprocess.run(
+        ["scenarios", "titles", str(context["feature_file"])],
+        capture_output=True,
+        text=True,
+    )
+    context["cli_returncode"] = result.returncode
+    context["cli_stdout"] = result.stdout
+    context["cli_stderr"] = result.stderr
+
+
+@then(parsers.parse("stdout's {ordinal} line is the {same_ordinal} scenario's title"))
+def then_stdout_line_is_scenario_title(
+    ordinal: str, same_ordinal: str, context: dict
+) -> None:
+    # The two ordinals in the Gherkin always agree ("first line is the first
+    # scenario's title"); requiring them to match keeps the step honest and
+    # catches a malformed scenario line.
+    assert ordinal == same_ordinal, (
+        f"expected matching ordinals; got line={ordinal!r} scenario={same_ordinal!r}"
+    )
+    idx = _ORDINALS[ordinal]
+    lines = context["cli_stdout"].splitlines()
+    assert len(lines) > idx, (
+        f"expected at least {idx + 1} line(s) of output; "
+        f"stdout was:\n{context['cli_stdout']}"
+    )
+    # `titles` emits ONLY the title — assert equality, not containment, so a
+    # `list`-style "<hash>\t<title>" line would fail this step.
+    assert lines[idx] == context["titles"][idx], (
+        f"expected {ordinal} line to be {context['titles'][idx]!r}; "
+        f"got {lines[idx]!r}; full stdout:\n{context['cli_stdout']}"
+    )
