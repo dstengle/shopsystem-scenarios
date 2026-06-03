@@ -23,13 +23,18 @@ Subcommands:
         Reads a feature file (FILE, or stdin when omitted) and writes one
         line per scenario carrying just that scenario's title, in file
         order. Unlike ``list``, no @scenario_hash column is emitted.
+    tags [FILE]
+        Reads a feature file (FILE, or stdin when omitted) and writes the
+        distinct @-tags carried by its scenarios, one tag per line, in
+        first-seen file order. A tag carried by more than one scenario is
+        emitted exactly once.
 """
 from __future__ import annotations
 
 import argparse
 import sys
 
-from scenarios.feature import iter_scenarios
+from scenarios.feature import iter_scenarios, iter_tags
 from scenarios.hash import compute_scenario_hash
 
 
@@ -82,6 +87,19 @@ def _cmd_titles(args: argparse.Namespace) -> int:
     # output is a clean title listing usable directly by downstream callers.
     for _scenario_hash, title in iter_scenarios(_read_feature(args)):
         print(title)
+    return 0
+
+
+def _cmd_tags(args: argparse.Namespace) -> int:
+    # Distinct @-tags, one per line, in first-seen file order. A dict over
+    # the tag iterator de-duplicates while preserving insertion order, so
+    # the output is deterministic (not subject to set-iteration order) and
+    # a tag repeated across scenarios collapses to a single line.
+    seen: dict[str, None] = {}
+    for tag in iter_tags(_read_feature(args)):
+        seen.setdefault(tag, None)
+    for tag in seen:
+        print(tag)
     return 0
 
 
@@ -141,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="feature file to read; reads stdin when omitted",
     )
     titles_cmd.set_defaults(func=_cmd_titles)
+
+    tags_cmd = sub.add_parser(
+        "tags",
+        help="print the distinct @-tags across a feature file, one per line",
+    )
+    tags_cmd.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="feature file to read; reads stdin when omitted",
+    )
+    tags_cmd.set_defaults(func=_cmd_tags)
 
     return parser
 

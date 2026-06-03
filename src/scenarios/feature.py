@@ -23,6 +23,9 @@ from typing import Iterator, Optional, Tuple
 # whitespace trimmed. "Scenario Outline" is accepted alongside "Scenario".
 _SCENARIO_RE = re.compile(r"^\s*Scenario(?:\s+Outline)?:\s*(?P<title>.*?)\s*$")
 _HASH_TAG_RE = re.compile(r"@scenario_hash:(?P<hash>\S+)")
+# A tag token: an @ followed by one or more non-whitespace characters.
+# Gherkin allows multiple whitespace-separated tags on one tag line.
+_TAG_RE = re.compile(r"@\S+")
 
 
 def iter_scenarios(feature_text: str) -> Iterator[Tuple[Optional[str], str]]:
@@ -45,3 +48,22 @@ def iter_scenarios(feature_text: str) -> Iterator[Tuple[Optional[str], str]]:
             tag = _HASH_TAG_RE.search(stripped)
             if tag is not None:
                 pending_hash = tag.group("hash")
+
+
+def iter_tags(feature_text: str) -> Iterator[str]:
+    """Yield each ``@``-tag occurrence across the feature file, in file order.
+
+    A tag is only honoured on a *tag line* — one whose stripped form starts
+    with ``@`` — mirroring the same line-start discipline ``iter_scenarios``
+    uses for ``@scenario_hash``. An ``@`` appearing mid-step (e.g. inside a
+    quoted phrase) is therefore ignored, consistent with canonicalization.
+
+    Tags are yielded with repetition: a tag carried by two scenarios is
+    yielded twice. De-duplication, if wanted, is the caller's concern.
+    """
+    for line in feature_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("@"):
+            continue
+        for match in _TAG_RE.finditer(stripped):
+            yield match.group(0)
