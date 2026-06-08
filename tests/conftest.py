@@ -973,3 +973,212 @@ def then_scenario_counted_in_denominator(handle: str, context: dict) -> None:
         f"expected the outstanding denominator to count the never-dispatched "
         f"scenario (handle {handle!r}); denominator was {view.denominator!r}"
     )
+
+
+# =======================================================================
+# journal_query.feature — `scenarios journal query <journal-file> <hash>`
+# reads an on-disk journal file (whose entries are block-only canonical
+# hashes) and reports a definite yes/no for the queried block-only hash.
+# Exit status is success in BOTH the yes and no cases (success ≠ "found");
+# the yes/no is reported on stdout. The answer is keyed SOLELY on the
+# block-only canonical hash — not on any bead id, scenario title, dispatch
+# record, or message-bus row. Exercised via subprocess against the
+# `scenarios` binary (the same boundary downstream callers use), mirroring
+# the hash/list/count/titles/tags CLI scenarios. The "h1"/"h2" symbols in
+# the Gherkin are stable test handles; each maps to a REAL block-only
+# canonical hash computed by compute_block_only_hash over a distinct
+# scenario body, so the query is genuinely keyed on the block-only hash.
+#
+# Journal-file format (established by THIS behavior, which the rebuild
+# behavior must conform to): a UTF-8 text file with one block-only
+# canonical hash per line. A present entry is exactly that hash on its own
+# line; nothing else (no bead id, title, dispatch record, or bus row) is
+# stored.
+# =======================================================================
+
+
+_JOURNAL_BODY_H1 = (
+    "Scenario: a journalled behavior that is present\n"
+    "    Given a behavior that some BC has serviced\n"
+    "    When the journal is queried for it\n"
+    "    Then the journal answers yes"
+)
+_JOURNAL_BODY_H2 = (
+    "Scenario: a behavior that is absent from the journal\n"
+    "    Given a behavior no BC has serviced\n"
+    "    When the journal is queried for it\n"
+    "    Then the journal answers no"
+)
+
+
+@given(
+    "a scenario journal stored as a file on disk under the "
+    "shopsystem-scenarios bounded context"
+)
+def given_scenario_journal_file(context: dict, tmp_path) -> None:
+    from scenarios.outstanding import compute_block_only_hash
+
+    # The journal lives on disk; its entries are block-only canonical
+    # hashes, one per line. Resolve the symbolic handles h1/h2 to REAL
+    # block-only hashes over distinct bodies so "keyed on the block-only
+    # hash" is observable rather than asserted against a literal string.
+    h1 = compute_block_only_hash(_JOURNAL_BODY_H1)
+    h2 = compute_block_only_hash(_JOURNAL_BODY_H2)
+    # Distinct handles guard against a fixture where present/absent collide.
+    assert h1 != h2, "fixture invariant: h1 and h2 block-only hashes collided"
+    context["block_only_hashes"] = {"h1": h1, "h2": h2}
+    context["journal_path"] = tmp_path / "scenarios.journal"
+    # Start with an empty journal; the present-entry Given populates it.
+    context["journal_entries"] = []
+
+
+@given(
+    parsers.parse(
+        'the journal file records the block-only canonical hash "{handle}" '
+        "as a present entry"
+    )
+)
+def given_journal_records_present(handle: str, context: dict) -> None:
+    block_only_hash = context["block_only_hashes"][handle]
+    # A present entry is exactly the block-only hash on its own line, with
+    # NO bead id, title, dispatch record, or message-bus row alongside it —
+    # the journal stores only hashes. This is what makes the eventual yes
+    # answer attributable solely to block-only-hash membership.
+    context["journal_entries"].append(block_only_hash)
+    context["journal_path"].write_text(
+        "".join(line + "\n" for line in context["journal_entries"]),
+        encoding="utf-8",
+    )
+
+
+@given(
+    parsers.parse(
+        'the journal file contains no entry for the block-only canonical '
+        'hash "{handle}"'
+    )
+)
+def given_journal_absent(handle: str, context: dict) -> None:
+    block_only_hash = context["block_only_hashes"][handle]
+    # The journal exists on disk but holds no entry equal to the queried
+    # block-only hash. Write whatever entries are accumulated (here, none)
+    # and guard that the queried hash is genuinely absent.
+    assert block_only_hash not in context["journal_entries"], (
+        f"fixture invariant: expected {handle!r} ({block_only_hash!r}) "
+        "absent from the journal, but it is present"
+    )
+    context["journal_path"].write_text(
+        "".join(line + "\n" for line in context["journal_entries"]),
+        encoding="utf-8",
+    )
+
+
+@when(
+    parsers.parse(
+        'the "scenarios journal query" CLI command is run against that '
+        'journal file for the block-only canonical hash "{handle}"'
+    )
+)
+def when_run_journal_query(handle: str, context: dict) -> None:
+    block_only_hash = context["block_only_hashes"][handle]
+    result = subprocess.run(
+        [
+            "scenarios",
+            "journal",
+            "query",
+            str(context["journal_path"]),
+            block_only_hash,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    context["cli_returncode"] = result.returncode
+    context["cli_stdout"] = result.stdout
+    context["cli_stderr"] = result.stderr
+    context["queried_handle"] = handle
+
+
+@then(
+    parsers.parse(
+        'the command exits with a success status and reports a definite '
+        '"{answer}" for "{handle}"'
+    )
+)
+def then_command_reports_definite_answer(
+    answer: str, handle: str, context: dict
+) -> None:
+    rc = context["cli_returncode"]
+    # Success status in BOTH the yes and no cases: success != "found".
+    assert rc == 0, (
+        f"expected success exit status (0) for a definite {answer!r} answer; "
+        f"got {rc}; stderr:\n{context.get('cli_stderr', '')}"
+    )
+    # The definite yes/no is reported on stdout as its own line.
+    lines = [line.strip() for line in context["cli_stdout"].splitlines()]
+    assert answer in lines, (
+        f"expected a definite {answer!r} line on stdout for {handle!r}; "
+        f"stdout was:\n{context['cli_stdout']}"
+    )
+    # A definite answer is exactly one of yes/no — guard against a CLI that
+    # emits both or neither.
+    assert ("yes" in lines) != ("no" in lines), (
+        f"expected exactly one definite yes/no line; stdout was:\n"
+        f"{context['cli_stdout']}"
+    )
+
+
+@then(
+    parsers.parse(
+        'the answer is keyed solely on the block-only canonical hash '
+        '"{handle}", not on any bead id, scenario title, dispatch record, '
+        "or message-bus row"
+    )
+)
+def then_answer_keyed_solely_on_block_only_hash(
+    handle: str, context: dict
+) -> None:
+    # The journal file on disk holds ONLY block-only hashes — one per line,
+    # nothing else. Re-querying the same on-disk journal for the same
+    # block-only hash must reproduce the same definite answer, with no bead
+    # id, title, dispatch record, or bus row available to key on (none are
+    # stored). Re-run the CLI to pin that the answer is a pure function of
+    # (journal file contents, queried block-only hash).
+    block_only_hash = context["block_only_hashes"][handle]
+
+    # The journal stores only hashes: every non-empty line is exactly a
+    # 16-hex-char block-only hash (the format this behavior establishes).
+    journal_lines = [
+        line.strip()
+        for line in context["journal_path"].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for line in journal_lines:
+        assert re.fullmatch(r"[0-9a-f]{16}", line), (
+            f"journal must store only block-only hashes, one per line; "
+            f"found a non-hash entry {line!r}"
+        )
+
+    rerun = subprocess.run(
+        [
+            "scenarios",
+            "journal",
+            "query",
+            str(context["journal_path"]),
+            block_only_hash,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rerun.returncode == context["cli_returncode"], (
+        "re-querying the same journal for the same block-only hash changed "
+        f"the exit status ({context['cli_returncode']} -> {rerun.returncode}); "
+        "the answer must be keyed solely on block-only-hash membership"
+    )
+    first = [l.strip() for l in context["cli_stdout"].splitlines()]
+    second = [l.strip() for l in rerun.stdout.splitlines()]
+    first_answer = "yes" if "yes" in first else "no"
+    second_answer = "yes" if "yes" in second else "no"
+    assert first_answer == second_answer, (
+        "re-querying the same journal for the same block-only hash changed "
+        f"the definite answer ({first_answer!r} -> {second_answer!r}); "
+        "the answer must be keyed solely on block-only-hash membership"
+    )
