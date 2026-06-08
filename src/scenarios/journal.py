@@ -19,7 +19,49 @@ property.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Union
+from typing import Iterable, Union
+
+from scenarios.feature import iter_scenarios
+
+
+def harvest_features_tree(features_tree: Union[str, Path]) -> list[str]:
+    """Harvest the as-committed ``@scenario_hash`` tag values under a tree.
+
+    Walks ``features_tree`` recursively for ``*.feature`` files and collects
+    the ``@scenario_hash:`` tag value attached to each scenario block, reading
+    the tag *as committed* — no hash is recomputed. Scenarios carrying no
+    ``@scenario_hash`` tag contribute nothing. The values are returned in
+    file-walk order (callers de-duplicate and order when writing); the walk is
+    sorted by path so the harvest itself is deterministic.
+    """
+    harvested: list[str] = []
+    for feature_path in sorted(Path(features_tree).rglob("*.feature")):
+        text = feature_path.read_text(encoding="utf-8")
+        for scenario_hash, _title in iter_scenarios(text):
+            if scenario_hash:
+                harvested.append(scenario_hash)
+    return harvested
+
+
+def write_journal_entries(
+    journal_path: Union[str, Path], entries: Iterable[str]
+) -> list[str]:
+    """Write ``entries`` to ``journal_path`` in the journal's on-disk format.
+
+    The entries are de-duplicated and emitted in a stable, deterministic
+    (sorted) order, one per line, UTF-8 — exactly the format
+    ``read_journal_entries`` reads back. Sorting plus de-duplication makes
+    the write *idempotent over an entry set*: rewriting the same set of
+    hashes yields a byte-identical file, so re-running a rebuild neither
+    duplicates nor drops an entry. The returned list is the written entry
+    order, so callers need not re-derive it.
+    """
+    ordered = sorted(set(entries))
+    Path(journal_path).write_text(
+        "".join(entry + "\n" for entry in ordered),
+        encoding="utf-8",
+    )
+    return ordered
 
 
 def read_journal_entries(journal_path: Union[str, Path]) -> list[str]:

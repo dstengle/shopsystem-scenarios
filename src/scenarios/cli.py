@@ -33,6 +33,12 @@ Subcommands:
         line) and writes a definite ``yes``/``no`` line to stdout reporting
         whether BLOCK-ONLY-HASH is recorded. Exits 0 in both cases —
         success means "answered", not "found".
+    journal rebuild FEATURES-TREE JOURNAL-FILE
+        Walks FEATURES-TREE recursively, harvests the as-committed
+        ``@scenario_hash`` tag values alone (no recomputation), and writes
+        them to JOURNAL-FILE in the journal format (one block-only canonical
+        hash per line). Idempotent: re-running over the same tree leaves an
+        identical entry set hash-for-hash.
 """
 from __future__ import annotations
 
@@ -41,7 +47,11 @@ import sys
 
 from scenarios.feature import iter_scenarios, iter_tags
 from scenarios.hash import compute_scenario_hash
-from scenarios.journal import is_recorded
+from scenarios.journal import (
+    harvest_features_tree,
+    is_recorded,
+    write_journal_entries,
+)
 
 
 def _cmd_hash(args: argparse.Namespace) -> int:
@@ -116,6 +126,18 @@ def _cmd_journal_query(args: argparse.Namespace) -> int:
     # stores only hashes, so there is no bead id, title, dispatch record, or
     # message-bus row to key on.
     print("yes" if is_recorded(args.journal_file, args.block_only_hash) else "no")
+    return 0
+
+
+def _cmd_journal_rebuild(args: argparse.Namespace) -> int:
+    # Harvest the as-committed @scenario_hash tag values across the features
+    # tree (no recomputation, no work_done or message-bus event) and write
+    # them as the journal file. write_journal_entries de-duplicates and emits
+    # a stable sorted order, so re-running over the same tree leaves an entry
+    # set identical hash-for-hash — the idempotency the behavior requires.
+    write_journal_entries(
+        args.journal_file, harvest_features_tree(args.features_tree)
+    )
     return 0
 
 
@@ -209,6 +231,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="block-only canonical hash to test for membership in the journal file",
     )
     journal_query_cmd.set_defaults(func=_cmd_journal_query)
+
+    journal_rebuild_cmd = journal_sub.add_parser(
+        "rebuild",
+        help="rebuild a journal file from a features tree's @scenario_hash tags",
+    )
+    journal_rebuild_cmd.add_argument(
+        "features_tree",
+        help="root of the features tree to harvest @scenario_hash tags from",
+    )
+    journal_rebuild_cmd.add_argument(
+        "journal_file",
+        help="path to the journal file to write (one block-only hash per line)",
+    )
+    journal_rebuild_cmd.set_defaults(func=_cmd_journal_rebuild)
 
     return parser
 
