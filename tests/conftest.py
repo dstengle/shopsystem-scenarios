@@ -1182,3 +1182,207 @@ def then_answer_keyed_solely_on_block_only_hash(
         f"the definite answer ({first_answer!r} -> {second_answer!r}); "
         "the answer must be keyed solely on block-only-hash membership"
     )
+
+
+# =======================================================================
+# journal_rebuild.feature — `scenarios journal rebuild <features-tree>
+# <journal-file>` walks a features tree, harvests the as-committed
+# @scenario_hash tag values, and writes them as a journal file in the
+# format the journal-query behavior established (one block-only canonical
+# hash per line, nothing else). The entries are derived from the committed
+# @scenario_hash tags ALONE — no recomputation, no work_done, and no
+# message-bus event is required. The command is idempotent: running it a
+# second time over the same features tree leaves an entry SET identical
+# hash-for-hash, neither duplicating nor dropping an entry. Exercised via
+# subprocess against the `scenarios` binary (the same boundary downstream
+# callers use); the features tree and journal output path are built under
+# tmp_path. The "h8a"/"h8b" symbols in the Gherkin are stable test handles;
+# each maps to a REAL block-only canonical hash computed by
+# compute_block_only_hash over a distinct scenario body, and each is
+# written into the fixture AS that scenario block's @scenario_hash tag so
+# the harvest reads the as-committed tag value honestly.
+# =======================================================================
+
+
+_REBUILD_BODY_H8A = (
+    "Scenario: a first serviced behavior to harvest from the tree\n"
+    "    Given a behavior that some BC has serviced\n"
+    "    When the journal is rebuilt from the features tree\n"
+    "    Then its block-only hash appears as a journal entry"
+)
+_REBUILD_BODY_H8B = (
+    "Scenario: a second serviced behavior to harvest from the tree\n"
+    "    Given another behavior that some BC has serviced\n"
+    "    When the journal is rebuilt from the features tree\n"
+    "    Then its block-only hash appears as a journal entry too"
+)
+
+
+@given(
+    parsers.parse(
+        "a features tree containing scenario blocks tagged with the "
+        '@scenario_hash tags "{handle_a}" and "{handle_b}", each tag equal '
+        "to its block's block-only canonical hash"
+    )
+)
+def given_features_tree_with_hashed_blocks(
+    handle_a: str, handle_b: str, context: dict, tmp_path
+) -> None:
+    from scenarios.outstanding import compute_block_only_hash
+
+    # Resolve the symbolic handles h8a/h8b to REAL block-only canonical
+    # hashes over distinct scenario bodies, then write each hash into the
+    # fixture AS its block's @scenario_hash tag. This makes the fixture
+    # internally honest: each as-committed tag value really equals the
+    # block-only canonical hash of the block it precedes, so a rebuild that
+    # harvests the committed tag values reproduces exactly {h8a, h8b}.
+    h8a = compute_block_only_hash(_REBUILD_BODY_H8A)
+    h8b = compute_block_only_hash(_REBUILD_BODY_H8B)
+    # Distinct handles guard against a fixture where the two blocks collide
+    # and the de-dup/idempotency assertions could pass vacuously.
+    assert h8a != h8b, "fixture invariant: h8a and h8b block-only hashes collided"
+
+    def _indent(body: str) -> str:
+        return "\n".join("  " + line for line in body.splitlines())
+
+    # A genuine TREE: the two blocks live in two feature files under nested
+    # subdirectories, so "walks the features tree" is exercised (not a single
+    # flat file). Each block carries a @bc: tag in addition to @scenario_hash,
+    # so a rebuild that naively echoed every tag (rather than only the
+    # @scenario_hash value) would write non-hash entries and fail the format
+    # assertion below.
+    features_dir = tmp_path / "features"
+    (features_dir / "alpha").mkdir(parents=True)
+    (features_dir / "beta").mkdir(parents=True)
+    (features_dir / "alpha" / "first.feature").write_text(
+        "Feature: alpha feature\n\n"
+        "  @scenario_hash:" + h8a + " @bc:shopsystem-scenarios\n"
+        f"{_indent(_REBUILD_BODY_H8A)}\n",
+        encoding="utf-8",
+    )
+    (features_dir / "beta" / "second.feature").write_text(
+        "Feature: beta feature\n\n"
+        "  @scenario_hash:" + h8b + " @bc:shopsystem-scenarios\n"
+        f"{_indent(_REBUILD_BODY_H8B)}\n",
+        encoding="utf-8",
+    )
+
+    context["features_dir"] = features_dir
+    context["journal_path"] = tmp_path / "scenarios.journal"
+    context["expected_entries"] = {handle_a: h8a, handle_b: h8b}
+
+
+@when(
+    parsers.parse(
+        'the "scenarios journal rebuild" CLI command is run against that '
+        "features tree to write a journal file on disk"
+    )
+)
+def when_run_journal_rebuild(context: dict) -> None:
+    result = subprocess.run(
+        [
+            "scenarios",
+            "journal",
+            "rebuild",
+            str(context["features_dir"]),
+            str(context["journal_path"]),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    context["cli_returncode"] = result.returncode
+    context["cli_stdout"] = result.stdout
+    context["cli_stderr"] = result.stderr
+
+
+def _journal_entry_set(journal_path: Path) -> set:
+    # The journal stores only block-only hashes, one per line, nothing else
+    # (the format the journal-query behavior established). Read every
+    # non-blank line, assert each is a 16-hex-char block-only hash, and
+    # return the SET of entries so duplicate/drop comparisons are by
+    # membership rather than file order.
+    lines = [
+        line.strip()
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for line in lines:
+        assert re.fullmatch(r"[0-9a-f]{16}", line), (
+            f"journal must store only block-only hashes, one per line; "
+            f"found a non-hash entry {line!r}"
+        )
+    # A faithful journal has no duplicate lines: a rebuild that emitted the
+    # same hash twice would inflate the line count beyond the entry set.
+    assert len(lines) == len(set(lines)), (
+        f"journal contains duplicate entries: {lines!r}"
+    )
+    return set(lines)
+
+
+@then(
+    parsers.parse(
+        "the journal file written under the shopsystem-scenarios bounded "
+        'context contains exactly the block-only canonical hashes "{handle_a}" '
+        'and "{handle_b}" as its entries, derived from the as-committed '
+        "@scenario_hash tags alone with no work_done or message-bus event "
+        "required"
+    )
+)
+def then_journal_contains_exactly(
+    handle_a: str, handle_b: str, context: dict
+) -> None:
+    # The rebuild must have exited cleanly: a non-zero exit (e.g. argparse
+    # rejecting an unknown `rebuild` action) means no faithful journal was
+    # written. Surface stderr so the RED failure reason is legible.
+    assert context["cli_returncode"] == 0, (
+        f"expected `scenarios journal rebuild` to exit 0; got "
+        f"{context['cli_returncode']}; stderr:\n{context.get('cli_stderr', '')}"
+    )
+    assert context["journal_path"].exists(), (
+        "expected the rebuild to write a journal file on disk; none found at "
+        f"{context['journal_path']}"
+    )
+    expected = {
+        context["expected_entries"][handle_a],
+        context["expected_entries"][handle_b],
+    }
+    actual = _journal_entry_set(context["journal_path"])
+    assert actual == expected, (
+        f"expected the journal entry set to be exactly {expected!r} "
+        f"(the as-committed @scenario_hash tag values for {handle_a!r}/"
+        f"{handle_b!r}); got {actual!r}"
+    )
+    # Stash the first-rebuild entry set so the idempotency Then compares
+    # against it rather than re-deriving the expectation.
+    context["first_entry_set"] = actual
+
+
+@then(
+    "running the rebuild CLI a second time over the same features tree leaves "
+    "the journal file with an entry set identical hash-for-hash, neither "
+    "duplicating nor dropping any entry"
+)
+def then_rebuild_is_idempotent(context: dict) -> None:
+    rerun = subprocess.run(
+        [
+            "scenarios",
+            "journal",
+            "rebuild",
+            str(context["features_dir"]),
+            str(context["journal_path"]),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rerun.returncode == 0, (
+        f"expected the second rebuild to exit 0; got {rerun.returncode}; "
+        f"stderr:\n{rerun.stderr}"
+    )
+    second_entry_set = _journal_entry_set(context["journal_path"])
+    # Identical hash-for-hash: the second rebuild neither dropped an entry
+    # (subset check) nor duplicated one (the per-line de-dup guard inside
+    # _journal_entry_set already fired) — the entry SET is unchanged.
+    assert second_entry_set == context["first_entry_set"], (
+        f"expected the second rebuild to leave an identical entry set; "
+        f"first={context['first_entry_set']!r} second={second_entry_set!r}"
+    )
