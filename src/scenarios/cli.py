@@ -28,6 +28,11 @@ Subcommands:
         distinct @-tags carried by its scenarios, one tag per line, in
         first-seen file order. A tag carried by more than one scenario is
         emitted exactly once.
+    journal query JOURNAL-FILE BLOCK-ONLY-HASH
+        Reads an on-disk journal file (one block-only canonical hash per
+        line) and writes a definite ``yes``/``no`` line to stdout reporting
+        whether BLOCK-ONLY-HASH is recorded. Exits 0 in both cases —
+        success means "answered", not "found".
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ import sys
 
 from scenarios.feature import iter_scenarios, iter_tags
 from scenarios.hash import compute_scenario_hash
+from scenarios.journal import is_recorded
 
 
 def _cmd_hash(args: argparse.Namespace) -> int:
@@ -100,6 +106,16 @@ def _cmd_tags(args: argparse.Namespace) -> int:
         seen.setdefault(tag, None)
     for tag in seen:
         print(tag)
+    return 0
+
+
+def _cmd_journal_query(args: argparse.Namespace) -> int:
+    # A definite yes/no, keyed solely on block-only-hash membership in the
+    # journal file. Both answers are success (exit 0): the command answers a
+    # question, it does not signal "found" via exit status. The journal
+    # stores only hashes, so there is no bead id, title, dispatch record, or
+    # message-bus row to key on.
+    print("yes" if is_recorded(args.journal_file, args.block_only_hash) else "no")
     return 0
 
 
@@ -171,6 +187,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="feature file to read; reads stdin when omitted",
     )
     tags_cmd.set_defaults(func=_cmd_tags)
+
+    # `journal` is a two-level command group: its own action subparser hangs
+    # off it so future journal actions (e.g. rebuild) share the namespace.
+    journal_cmd = sub.add_parser(
+        "journal",
+        help="operate on the on-disk scenario journal of serviced block-only hashes",
+    )
+    journal_sub = journal_cmd.add_subparsers(dest="journal_action", required=True)
+
+    journal_query_cmd = journal_sub.add_parser(
+        "query",
+        help="report yes/no whether a block-only hash is recorded in a journal file",
+    )
+    journal_query_cmd.add_argument(
+        "journal_file",
+        help="path to the journal file (one block-only canonical hash per line)",
+    )
+    journal_query_cmd.add_argument(
+        "block_only_hash",
+        help="block-only canonical hash to test for membership in the journal file",
+    )
+    journal_query_cmd.set_defaults(func=_cmd_journal_query)
 
     return parser
 
