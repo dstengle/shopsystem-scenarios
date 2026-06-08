@@ -848,3 +848,128 @@ def then_stdout_lists_distinct_tags_once(context: dict) -> None:
         f"expected distinct tags {context['expected_tags']!r}; "
         f"got {sorted(lines)!r}; full stdout:\n{context['cli_stdout']}"
     )
+
+
+# =======================================================================
+# outstanding_view.feature — the system-wide outstanding view. A canonical
+# scenario is "outstanding" when its BLOCK-ONLY canonical hash (a hash over
+# the Scenario keyword + step lines, excluding ALL tag lines — distinct from
+# compute_scenario_hash, which keeps @bc: tags) has no BC journal record and
+# no landed work_done. Exercised IN-PROCESS via the (not-yet-existing)
+# scenarios.outstanding API; the canonical features live under a hermetic
+# tmp_path directory so the assertion does not depend on the repo's own
+# evolving feature set. The "h6" symbol in the Gherkin is the scenario's
+# stable handle within the test; the actual hash is computed by the new
+# block-only hash function over the authored body.
+# =======================================================================
+
+
+_OUTSTANDING_SCENARIO_BODY = (
+    "Scenario: a never-dispatched canonical scenario\n"
+    "    Given a precondition that no BC has ever serviced\n"
+    "    When the outstanding view is computed\n"
+    "    Then this scenario is counted as outstanding"
+)
+
+
+@given(
+    parsers.parse(
+        "a canonical scenario authored under this repo's features with "
+        'block-only canonical hash "{handle}"'
+    )
+)
+def given_canonical_scenario_with_block_only_hash(
+    handle: str, context: dict, tmp_path
+) -> None:
+    # Author a single canonical scenario into a hermetic features directory.
+    # The scenario carries an @bc: tag (which compute_scenario_hash would
+    # KEEP) precisely so that the block-only hash — which must drop ALL tag
+    # lines — is observably distinct from compute_scenario_hash's output.
+    from scenarios.outstanding import compute_block_only_hash
+
+    feature_text = (
+        "Feature: a hermetic feature with one canonical scenario\n\n"
+        "  @bc:shopsystem-scenarios\n"
+        f"  {_OUTSTANDING_SCENARIO_BODY.splitlines()[0]}\n"
+        + "\n".join(
+            "  " + line for line in _OUTSTANDING_SCENARIO_BODY.splitlines()[1:]
+        )
+        + "\n"
+    )
+    features_dir = tmp_path / "features"
+    features_dir.mkdir()
+    (features_dir / "hermetic.feature").write_text(feature_text, encoding="utf-8")
+
+    block_only_hash = compute_block_only_hash(_OUTSTANDING_SCENARIO_BODY)
+
+    # The block-only hash must differ from the @bc:-retaining canonical hash:
+    # this is what makes "block-only" a distinct, load-bearing concept rather
+    # than an alias of compute_scenario_hash.
+    tagged_body = (
+        "@bc:shopsystem-scenarios\n" + _OUTSTANDING_SCENARIO_BODY
+    )
+    assert block_only_hash != compute_scenario_hash(tagged_body), (
+        "fixture invariant violated: block-only hash must drop @bc: tags and "
+        "so must differ from the @bc:-retaining canonical hash"
+    )
+
+    context["features_dir"] = features_dir
+    context["block_only_hashes"] = {handle: block_only_hash}
+
+
+@given(
+    parsers.parse(
+        'no BC journal records "{handle}" and no work_done has ever landed '
+        'for "{handle2}"'
+    )
+)
+def given_no_records_for_hash(handle: str, handle2: str, context: dict) -> None:
+    assert handle == handle2, (
+        f"expected the same handle on both sides; got {handle!r} / {handle2!r}"
+    )
+    # The empty record set: no journal entries, no landed work_done. With no
+    # records, every canonical scenario under features must be outstanding.
+    context["records"] = set()
+
+
+@when(
+    "the system-wide outstanding view is computed over all canonical "
+    "scenarios under features"
+)
+def when_compute_outstanding_view(context: dict) -> None:
+    from scenarios.outstanding import compute_outstanding_view
+
+    context["view"] = compute_outstanding_view(
+        context["features_dir"], context["records"]
+    )
+
+
+@then(
+    parsers.parse(
+        'the outstanding view lists the scenario with block-only canonical '
+        'hash "{handle}" as outstanding'
+    )
+)
+def then_view_lists_scenario_as_outstanding(handle: str, context: dict) -> None:
+    block_only_hash = context["block_only_hashes"][handle]
+    view = context["view"]
+    assert block_only_hash in view.outstanding, (
+        f"expected block-only hash {block_only_hash!r} (handle {handle!r}) to "
+        f"appear in the outstanding listing; listing was {view.outstanding!r}"
+    )
+
+
+@then(
+    parsers.parse(
+        'the scenario with hash "{handle}" is counted in the outstanding '
+        "denominator despite never having been dispatched to any BC"
+    )
+)
+def then_scenario_counted_in_denominator(handle: str, context: dict) -> None:
+    view = context["view"]
+    # The single authored canonical scenario, never dispatched and with no
+    # records, must contribute to the outstanding denominator.
+    assert view.denominator >= 1, (
+        f"expected the outstanding denominator to count the never-dispatched "
+        f"scenario (handle {handle!r}); denominator was {view.denominator!r}"
+    )
