@@ -1386,3 +1386,181 @@ def then_rebuild_is_idempotent(context: dict) -> None:
         f"expected the second rebuild to leave an identical entry set; "
         f"first={context['first_entry_set']!r} second={second_entry_set!r}"
     )
+
+
+# =======================================================================
+# completion_journal.feature — the scenarios completed-entries read serves
+# the request_completion_journal pull: given an on-disk journal file (one
+# block-only canonical hash per line, the format the journal-query behavior
+# established), it returns the SET of block-only canonical hashes present in
+# the file. The returned set is keyed SOLELY on the block-only canonical
+# hash — no bead id, scenario title, dispatch record, or message-bus row is
+# stored or returned. An empty journal yields the empty set as a definite,
+# successful answer (not an error). Exercised IN-PROCESS via the
+# (not-yet-existing) scenarios.journal.read_completed_entries API, mirroring
+# the in-process journal helpers (read_journal_entries, is_recorded) rather
+# than a CLI subprocess; the journal file is built under tmp_path. The
+# "h1"/"h2" symbols in the Gherkin are stable test handles, each mapping to
+# a REAL block-only canonical hash (resolved by the shared journal-file
+# Given via compute_block_only_hash over a distinct body) so the read is
+# genuinely keyed on the block-only hash.
+#
+# NOTE: the shared Given "a scenario journal stored as a file on disk under
+# the shopsystem-scenarios bounded context" (defined in the journal_query
+# section above) is reused verbatim — it seeds context["block_only_hashes"]
+# (h1/h2), context["journal_path"], and an empty context["journal_entries"].
+# =======================================================================
+
+
+@given(
+    parsers.parse(
+        'the journal file records the block-only canonical hashes "{handle_a}" '
+        'and "{handle_b}" as its present entries'
+    )
+)
+def given_journal_records_two_present(
+    handle_a: str, handle_b: str, context: dict
+) -> None:
+    # Two present entries, each exactly a block-only hash on its own line —
+    # NO bead id, title, dispatch record, or message-bus row alongside them.
+    # The set of present entries is therefore attributable solely to
+    # block-only-hash membership.
+    h_a = context["block_only_hashes"][handle_a]
+    h_b = context["block_only_hashes"][handle_b]
+    assert h_a != h_b, (
+        f"fixture invariant: present entries {handle_a!r}/{handle_b!r} collided"
+    )
+    context["journal_entries"].extend([h_a, h_b])
+    context["journal_path"].write_text(
+        "".join(line + "\n" for line in context["journal_entries"]),
+        encoding="utf-8",
+    )
+    # Stash the expected present SET so the Then compares against it.
+    context["expected_present_set"] = {h_a, h_b}
+
+
+@given("the journal file records no present entries")
+def given_journal_records_none(context: dict) -> None:
+    # An empty journal: the file exists on disk but holds no present entries.
+    # Write whatever has accumulated (here, nothing) so the read sees a real,
+    # empty file rather than a missing one.
+    assert context["journal_entries"] == [], (
+        "fixture invariant: expected no accumulated entries for the "
+        f"empty-journal scenario; got {context['journal_entries']!r}"
+    )
+    context["journal_path"].write_text("", encoding="utf-8")
+    context["expected_present_set"] = set()
+
+
+@when(
+    "the scenarios completed-entries read is run against that journal file "
+    "to serve the request_completion_journal pull"
+)
+def when_run_completed_entries_read(context: dict) -> None:
+    # The read surface: an in-process function returning the SET of present
+    # block-only hashes. Resolved lazily so the RED failure is the missing
+    # read surface (the function does not exist yet) rather than a
+    # collection-time import error. A success status is the absence of an
+    # exception — an empty journal must NOT raise.
+    from scenarios.journal import read_completed_entries
+
+    try:
+        context["completed_set"] = read_completed_entries(context["journal_path"])
+        context["read_raised"] = None
+    except Exception as exc:  # noqa: BLE001 — the empty-set scenario pins no-raise
+        context["completed_set"] = None
+        context["read_raised"] = exc
+
+
+@then(
+    parsers.parse(
+        'the read returns exactly the set of block-only canonical hashes '
+        '"{handle_a}" and "{handle_b}"'
+    )
+)
+def then_read_returns_exact_set(
+    handle_a: str, handle_b: str, context: dict
+) -> None:
+    assert context["read_raised"] is None, (
+        f"expected the completed-entries read to succeed; it raised "
+        f"{context['read_raised']!r}"
+    )
+    result = context["completed_set"]
+    # The read returns a SET (membership, not file order): assert set
+    # semantics explicitly so a list in file order would fail this step.
+    assert isinstance(result, (set, frozenset)), (
+        f"expected the read to return a set of block-only hashes; got "
+        f"{type(result).__name__}: {result!r}"
+    )
+    expected = {
+        context["block_only_hashes"][handle_a],
+        context["block_only_hashes"][handle_b],
+    }
+    assert set(result) == expected, (
+        f"expected the read to return exactly {expected!r}; got {result!r}"
+    )
+
+
+@then(
+    "the returned set is keyed solely on the block-only canonical hash, "
+    "carrying no bead id, scenario title, dispatch record, or message-bus row"
+)
+def then_returned_set_keyed_solely_on_hash(context: dict) -> None:
+    result = context["completed_set"]
+    assert result is not None, (
+        "expected a returned set to inspect; the read produced none "
+        f"(it raised {context['read_raised']!r})"
+    )
+    # Every returned member is exactly a 16-hex-char block-only hash — there
+    # is no other field (bead id, title, dispatch record, bus row) carried,
+    # since the journal stores and the read returns only hashes.
+    for member in result:
+        assert isinstance(member, str), (
+            f"expected each returned member to be a block-only hash string; "
+            f"got {type(member).__name__}: {member!r}"
+        )
+        assert re.fullmatch(r"[0-9a-f]{16}", member), (
+            f"returned set must carry only block-only hashes; found a "
+            f"non-hash member {member!r}"
+        )
+    # The on-disk journal also stores only hashes, so the returned set is a
+    # pure function of (journal file contents) keyed on block-only hash: it
+    # equals exactly the present-entry set seeded into the file.
+    assert set(result) == context["expected_present_set"], (
+        f"expected the returned set to equal the present-entry set "
+        f"{context['expected_present_set']!r}; got {set(result)!r}"
+    )
+
+
+@then("the read returns the empty set of block-only canonical hashes")
+def then_read_returns_empty_set(context: dict) -> None:
+    assert context["read_raised"] is None, (
+        f"expected the empty-journal read to succeed; it raised "
+        f"{context['read_raised']!r}"
+    )
+    result = context["completed_set"]
+    assert isinstance(result, (set, frozenset)), (
+        f"expected the read to return a set; got {type(result).__name__}: "
+        f"{result!r}"
+    )
+    assert set(result) == set(), (
+        f"expected the empty set for a journal with no present entries; got "
+        f"{result!r}"
+    )
+
+
+@then(
+    "the read exits with a success status rather than treating the empty "
+    "journal as an error"
+)
+def then_empty_read_is_success_not_error(context: dict) -> None:
+    # Success status for the empty journal is the ABSENCE of a raised
+    # exception: an empty journal is a definite empty answer, not a failure.
+    assert context["read_raised"] is None, (
+        f"expected the empty-journal read to exit successfully (no raise); "
+        f"it raised {context['read_raised']!r}"
+    )
+    assert context["completed_set"] == set(), (
+        f"expected a definite empty-set answer on success; got "
+        f"{context['completed_set']!r}"
+    )
