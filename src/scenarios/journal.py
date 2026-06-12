@@ -77,6 +77,22 @@ def read_journal_entries(journal_path: Union[str, Path]) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+def read_completed_entries(journal_path: Union[str, Path]) -> set[str]:
+    """Return the SET of block-only canonical hashes present in the journal.
+
+    Serves the ``request_completion_journal`` pull: the journal stores only
+    block-only hashes, one per line, so the present-entry set is keyed *solely*
+    on the block-only hash — there is no bead id, scenario title, dispatch
+    record, or message-bus row to carry. Built on ``read_journal_entries``,
+    whose per-line strip-and-drop-blank handling means a journal with no
+    present entries (empty or whitespace-only file) yields the empty set,
+    returned successfully rather than raised: an empty journal is a definite
+    empty answer, not an error. The ``set`` de-duplicates, so a hash recorded
+    on more than one line contributes a single member.
+    """
+    return set(read_journal_entries(journal_path))
+
+
 def is_recorded(journal_path: Union[str, Path], block_only_hash: str) -> bool:
     """Return whether ``block_only_hash`` is recorded in the journal file.
 
