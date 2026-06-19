@@ -58,7 +58,8 @@ responses; never hand-write YAML.
   behaviorally important case (one whose answer would change a reasonable
   implementation): `shop-msg respond clarify --bc <name> --work-id
   <work_id> --question "<one specific scenario tightening>"`. This is the
-  canonical Reviewer → lead loop in §4.4.
+  canonical Reviewer → lead clarify loop: the Reviewer raises the scenario
+  gap to the lead rather than guessing the missing pin or papering over it.
 - **Implementation gap → `work_done` blocked.** The scenarios are fine but
   the implementation gets a pinned case wrong (or the gate fails):
   `shop-msg respond work_done --bc <name> --work-id <work_id> --status
@@ -69,7 +70,8 @@ responses; never hand-write YAML.
 A `mechanism_observation` may accompany your primary response when its
 trigger fires:
 
-- A scenario gap → **clarify** (the §4.4 path), not a mechanism observation.
+- A scenario gap → **clarify** (the Reviewer → lead path), not a mechanism
+  observation.
 - An implementation gap → **work_done(blocked)**, not a mechanism
   observation.
 - A load-bearing weakness in the *mechanism* (your own template's

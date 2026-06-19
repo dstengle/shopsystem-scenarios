@@ -71,22 +71,54 @@ digraph bc_router {
 }
 ```
 
+## Session-start work-tracker health step
+
+Before the role loop begins, run the **work-tracker health step** — it runs
+at SESSION-START and gates the role loop. The tracker is **healthy** only when
+`bd create` and `bd ready` exit zero (local writability) AND a **test dolt
+push** to the configured Dolt remote exits zero (remote writability); then the
+BC proceeds to begin its role loop.
+
+- **Heal an unprovisioned-but-recoverable tracker** (empty working set, no
+  issue_prefix configured, but the committed registry names a definite
+  issue_prefix and carries ≥1 issue): **adopt** the committed `issue_prefix`
+  (taken from the committed registry — **not derived from the BC's name**) and
+  **import** the committed registry's issues into the tracker's working set,
+  preserving each **original id unchanged** (no committed issue dropped or
+  overwritten). Then **re-validate**: after the heal `bd create` exits zero and
+  a test dolt push exits zero, re-validating the tracker as healthy, and
+  proceed to the role loop.
+- **Block on an unhealable tracker** (empty working set + no issue_prefix +
+  committed registry names no prefix to adopt, so the tracker **cannot be
+  healed**): surface an explicit work-tracker health FAILURE naming the
+  unhealable condition; the BC **does not begin its role loop** and emits no
+  role work.
+- **Block on a remote-unwritable tracker** (locally writable but the test dolt
+  push exits non-zero): report the tracker as **unhealthy** naming the failed
+  test dolt push as the cause; the BC **does not begin its role loop** and
+  emits no role work.
+
+The failure is surfaced at **session-start** rather than at `work_done`
+emission time — pulling tracker detection forward so a wedged tracker never
+surfaces mid-work.
+
 ## Step-by-Step Protocol
 
 1. **Orient.** Run `shop-msg prime --bc <name>` and `bd prime` at session start.
-2. **Arm Monitor.** Start `shop-msg watch --bc <name>`.
-3. **Read.** For each pending message: `shop-msg read inbox --bc <name> --work-id <id>`.
-4. **Sufficiency check.** Invoke the `bc-sufficiency-check` skill (via Skill tool) with the full message. If the check fails, emit `shop-msg respond clarify` naming the gap(s) and **stop** — do not dispatch.
-5. **Isolate.** Invoke `using-git-worktrees` (via Skill tool) to create a branch/worktree named for the work_id before any implementation begins.
-6. **Plan (scenario work only).** Invoke `writing-plans-bdd` (via Skill tool) to decompose the assigned scenario(s) into a bd sub-issue DAG: one RED sub-issue and one GREEN sub-issue per behavior, with `bd dep` edges encoding order. The router uses the Skill tool for this; it does NOT write feature files, step defs, or src/ files itself.
-7. **Orchestrate (scenario work only).** Run the `subagent-driven-development` dispatch loop (via Skill tool):
+2. **Work-tracker health step.** Validate/heal the bd tracker (see above); the role loop is blocked until it reports healthy.
+3. **Arm Monitor.** Start `shop-msg watch --bc <name>`.
+4. **Read.** For each pending message: `shop-msg read inbox --bc <name> --work-id <id>`.
+5. **Sufficiency check.** Invoke the `bc-sufficiency-check` skill (via Skill tool) with the full message. If the check fails, emit `shop-msg respond clarify` naming the gap(s) and **stop** — do not dispatch.
+6. **Isolate.** Invoke `using-git-worktrees` (via Skill tool) to create a branch/worktree named for the work_id before any implementation begins.
+7. **Plan (scenario work only).** Invoke `writing-plans-bdd` (via Skill tool) to decompose the assigned scenario(s) into a bd sub-issue DAG: one RED sub-issue and one GREEN sub-issue per behavior, with `bd dep` edges encoding order. The router uses the Skill tool for this; it does NOT write feature files, step defs, or src/ files itself.
+8. **Orchestrate (scenario work only).** Run the `subagent-driven-development` dispatch loop (via Skill tool):
    - `bd ready` → dispatch all unblocked sub-issues **in parallel** to bc-implementer subagents (via Task/Agent tools).
    - Wait for all dispatched subagents to complete.
    - Gate between layers: verify each sub-issue is closed and that `test(red)` precedes `feat(green)` in the work-branch history.
    - Repeat until the DAG is drained.
-8. **Integrate (scenario work only).** Invoke `integrating-to-main` (via Skill tool) to land the work branch on `origin/main`.
-9. **Review dispatch (scenario work only).** Dispatch to the reviewer subagent (`.claude/agents/bc-reviewer.md`) via the Task/Agent tool — do NOT emit `work_done` yourself. The reviewer is the sole gate for scenario-based work.
-10. **Non-scenario work.** For `request_maintenance` and `request_bugfix` with no scenarios, dispatch a single bc-implementer subagent (no planning phase, no reviewer dispatch). The implementer emits `work_done` directly.
+9. **Integrate (scenario work only).** Invoke `integrating-to-main` (via Skill tool) to land the work branch on `origin/main`.
+10. **Review dispatch (scenario work only).** Dispatch to the reviewer subagent (`.claude/agents/bc-reviewer.md`) via the Task/Agent tool — do NOT emit `work_done` yourself. The reviewer is the sole gate for scenario-based work.
+11. **Non-scenario work.** For `request_maintenance` and `request_bugfix` with no scenarios, dispatch a single bc-implementer subagent (no planning phase, no reviewer dispatch). The implementer emits `work_done` directly.
 
 ## What the Router Does NOT Do
 
