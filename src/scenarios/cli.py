@@ -54,14 +54,37 @@ from scenarios.journal import (
 )
 
 
-def _cmd_hash(args: argparse.Namespace) -> int:
+def _read_scenario_stdin(command: str) -> str | None:
+    # `hash` and `verify` both canonicalize a scenario body piped on stdin.
+    # Empty (or whitespace-only) stdin is a caller error — not a scenario
+    # whose hash is the SHA-256-of-empty-string (e3b0c44...). Hashing it
+    # silently would emit a value indistinguishable from a real scenario
+    # hash and let `verify` report a confident false "hash mismatch", a
+    # silent false negative that can mislead a reviewer into a false gate
+    # block (bead uh7). Return None to signal the caller should error out.
     gherkin_text = sys.stdin.read()
+    if not gherkin_text.strip():
+        print(
+            f"scenarios {command}: no scenario text on stdin "
+            "(pipe a Gherkin scenario body in)",
+            file=sys.stderr,
+        )
+        return None
+    return gherkin_text
+
+
+def _cmd_hash(args: argparse.Namespace) -> int:
+    gherkin_text = _read_scenario_stdin("hash")
+    if gherkin_text is None:
+        return 2
     print(compute_scenario_hash(gherkin_text))
     return 0
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    gherkin_text = sys.stdin.read()
+    gherkin_text = _read_scenario_stdin("verify")
+    if gherkin_text is None:
+        return 2
     actual = compute_scenario_hash(gherkin_text)
     if actual == args.hash:
         return 0
