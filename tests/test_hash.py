@@ -7,8 +7,21 @@ in the canonicalization would invalidate every hash recorded in
 runs/scenario-N/.
 """
 import subprocess
+import sys
 
 from scenarios.hash import compute_scenario_hash
+
+
+# Invoking the CLI as `python -m scenarios` (rather than the installed
+# `scenarios` console script) pins the run to *this* worktree's source under
+# PYTHONPATH=src, sidestepping the stale-wheel / cross-worktree editable
+# install that shadows a bare `import scenarios` (see bead cdi).
+_CLI = [sys.executable, "-m", "scenarios"]
+
+# SHA-256 of the empty string, truncated to the 16-hex-char canonical hash
+# width. Empty stdin must NEVER be reported as this "computed" hash — doing
+# so is the silent false-negative this regression pins against (bead uh7).
+_EMPTY_STRING_HASH = compute_scenario_hash("")
 
 
 def test_known_scenario_hash_is_stable():
@@ -90,3 +103,56 @@ def test_cli_verify_non_matching_hash_exits_nonzero_with_stderr():
     assert result.stdout == ""
     assert wrong in result.stderr
     assert actual in result.stderr
+
+
+def test_cli_hash_rejects_empty_stdin_instead_of_hashing_the_empty_string():
+    # Empty stdin is a caller error, not a scenario whose hash is the
+    # SHA-256-of-empty-string. Hashing it silently produces e3b0c44...,
+    # which a downstream reader cannot distinguish from a real scenario hash
+    # (bead uh7). The CLI must instead exit non-zero with a clear message and
+    # emit no hash on stdout.
+    result = subprocess.run(
+        _CLI + ["hash"],
+        input="",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert _EMPTY_STRING_HASH not in result.stdout
+    assert "stdin" in result.stderr.lower()
+
+
+def test_cli_verify_rejects_empty_stdin_instead_of_false_mismatch():
+    # With empty stdin, `verify` previously hashed the empty string to
+    # e3b0c44... and reported a confident "hash mismatch" against the real
+    # on-disk scenario — a silent false negative that can mislead a reviewer
+    # into a false gate block (bead uh7). Empty stdin must be an explicit
+    # error, not a mismatch verdict, and must never surface the
+    # empty-string hash as the "computed" value.
+    real_hash = "3f123ba774758ff2"  # a genuine on-disk scenario hash
+    result = subprocess.run(
+        _CLI + ["verify", "--hash", real_hash],
+        input="",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert _EMPTY_STRING_HASH not in result.stderr
+    assert "mismatch" not in result.stderr.lower()
+    assert "stdin" in result.stderr.lower()
+
+
+def test_cli_verify_rejects_whitespace_only_stdin():
+    # Whitespace-only stdin canonicalizes to the empty body just like truly
+    # empty stdin, so it must hit the same guard rather than silently
+    # verifying against the empty-string hash (bead uh7).
+    result = subprocess.run(
+        _CLI + ["verify", "--hash", "deadbeefdeadbeef"],
+        input="   \n  \t\n",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert _EMPTY_STRING_HASH not in result.stderr
+    assert "stdin" in result.stderr.lower()
