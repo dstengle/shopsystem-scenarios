@@ -34,12 +34,12 @@ A dirty tree at `work_done` time means uncommitted work may be present. The BC m
 
 ```bash
 git fetch origin
-git log origin/main --oneline | grep <work_id>
+git log origin/main -E --grep="\b<work_id>\b" --oneline
 ```
 
-**Pass:** `grep` finds the work_id substring in at least one commit on `origin/main`.
+**Pass:** the search finds the work_id as a WHOLE TOKEN in at least one commit on `origin/main`.
 
-**Fail:** `grep` returns no match.
+**Fail:** no match.
 
 Evidence on failure: show the current `origin/main` HEAD SHA and the work_id searched for. Block with message:
 ```
@@ -48,7 +48,7 @@ blocked: work_id <work_id> not reachable from origin/main (HEAD: <sha>). Run int
 
 **Why `git fetch origin` first:** the local ref `origin/main` may be stale. Fetching before the check ensures the gate sees the actual remote state. Skipping the fetch is a false pass.
 
-The attribution mechanism: the work_id substring must appear in the commit subject or body. Tags and `git notes` are also acceptable, but the `git log --oneline | grep` form is the canonical check.
+The attribution mechanism: the work_id must appear as a WHOLE TOKEN (exact / word-boundary match — bounded by start/end-of-line or non-identifier characters) in the commit subject or body, NOT as a loose substring. A work_id that is a strict PREFIX of another commit's work_id (e.g. `lead-8v` as a prefix of `lead-8vwf`) therefore does NOT match — loose substring matching false-positive-attributes the wrong commit's lineage. Tags and `git notes` naming exactly the work_id are also acceptable, but the word-boundary `git log -E --grep="\b<work_id>\b"` form is the canonical check (it is the same canonical attribution form the executable `bc-emit work-done` wrapper applies in both its commit-mode and tag-mode reachability checks).
 
 ### Check 3: Scenario Hash Integrity (ADR-010)
 
@@ -136,7 +136,7 @@ blocked: no test-first commit sequence for <behavior>
 | Check | Command | Pass condition | Fail → blocked evidence |
 |---|---|---|---|
 | Clean working tree | `git status --porcelain` | empty output | dirty paths list |
-| work_id reachable | `git fetch origin && git log origin/main --oneline \| grep <work_id>` | grep matches | work_id + origin/main HEAD SHA |
+| work_id reachable | `git fetch origin && git log origin/main -E --grep="\b<work_id>\b" --oneline` | whole-token match | work_id + origin/main HEAD SHA |
 | Scenario hash subset | `scenarios hash` + `git grep` | all hashes in features/ | mismatched hash + path + SHA |
 | BD plan sub-issues | `bd show <work_id>` | sub-issue(s) exist, all closed, ≥1 RED | "no bd plan sub-issues for <work_id>" |
 | Test-first artifact | `git log --oneline bc/<work_id>` | test(red) precedes feat(green) per behavior | "no test-first commit sequence for <behavior>" |

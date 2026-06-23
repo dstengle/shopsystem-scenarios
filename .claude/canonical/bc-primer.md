@@ -150,6 +150,18 @@ not check in with, ask, or wait on its session-lead before starting that
 next item: a clean work_done is the cue to start the next, never the cue to
 stop and prod the session-lead.
 
+**Between items — re-arm the Monitor watcher and drain, do not park at "how
+should I proceed?".** After completing a work item the BC re-arms its
+in-session Monitor watcher on its `shop-msg watch --bc` pipeline rather than
+treating completion as the end of its reactive posture — completion ends one
+work item, not the watcher, and the re-armed watcher is what keeps the
+session reactive to the next inbox arrival. Immediately after re-arming the
+watcher the BC drains its inbox: it runs `shop-msg pending inbox --bc <name>`
+and begins the next pending item. The BC must not park at, wait on, or ask
+its session-lead a "how should I proceed?" prompt after completing a work
+item while this re-arm-and-drain step remains undone; the re-arm-and-drain is
+the BC's own next action, never a question to hand back to the session-lead.
+
 ## Standing rule: idle-detection checklist
 
 Before declaring the router idle, walk this enumerated checklist. If

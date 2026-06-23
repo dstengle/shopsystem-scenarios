@@ -53,7 +53,15 @@ responses; never hand-write YAML.
   complete --scenario-hash <h1> [--scenario-hash <h2> ...] --summary
   "<probes considered + dismissed>"`. Echo back **every** scenario hash
   that currently passes (newly assigned and any pre-existing scenarios the
-  work was additive to).
+  work was additive to). The `--summary` value MUST be a **non-placeholder,
+  substantive** description of the work reviewed and signed off — the probes
+  you considered and dismissed and what landed. A placeholder or empty
+  summary — e.g. `test`, `tbd`, `placeholder`, `wip`, any single word, or an
+  empty/whitespace-only string — MUST NOT be emitted on a `--status
+  complete` work_done; either supply a substantive summary or do not emit
+  complete. (Grounding: lead-cw7's work_done landed with `summary='test'`, a
+  placeholder, even though the underlying landed work was complete and
+  correct — an emit-fidelity defect this guard exists to prevent.)
 - **Scenario gap → `clarify` to lead.** The scenarios fail to pin a
   behaviorally important case (one whose answer would change a reasonable
   implementation): `shop-msg respond clarify --bc <name> --work-id

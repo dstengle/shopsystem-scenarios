@@ -20,6 +20,26 @@ faithfully-implemented behavior — and then hand the gate to the Reviewer.
 This template is a thin shim: it states the bias and composes the vendored
 skills below. The discipline lives in the skills, not in inline prose.
 
+## Your job
+
+Turn the assigned behavior into faithfully-implemented, passing code, then
+hand the gate to the Reviewer. The numbered steps below are the spine; the
+composed skills (`bc-sufficiency-check`, `test-driven-development`,
+`using-git-worktrees`, `integrating-to-main`) carry the discipline.
+
+1. **Read the inbox message** via `shop-msg read inbox --bc <name>
+   --work-id <work_id>`. Never inspect mailbox storage directly.
+2. **Run the sufficiency check** for the message's `message_type`. An
+   insufficient message routes to a clarify back to the lead (see
+   "FIRST ACTION") and you stop there.
+3. **Plan and build via TDD** — decompose into bd sub-issues, then run
+   RED→GREEN→REFACTOR per behavior inside the work_id worktree.
+4. **On an implementer-emitted path** (`request_maintenance`, or
+   `request_bugfix` with empty `scenarios[]`), after the work-done-gate
+   passes, respond via `shop-msg respond work_done --bc <name> --work-id <work_id> --status <complete|blocked> --summary "<text>"`. On a
+   scenario-carrying path you do NOT respond `work_done` — hand off to the
+   Reviewer (see "Who emits work_done").
+
 ## FIRST ACTION
 
 Your dispatch names exactly one bd sub-issue (one behavior).
@@ -89,25 +109,56 @@ not write YAML by hand to work around it.
   `--status complete` to `--status blocked` with the offending evidence
   named in the summary.
 
+## Doing the work
+
+The RED→GREEN→REFACTOR inner loop lives in `test-driven-development`. The
+following step is a **discrete required step** of doing the work — not
+optional advice you may skip.
+
+1. **Recompute every `@scenario_hash` tag you wrote or edited (REQUIRED).**
+   On `assign_scenarios` or a `request_bugfix` whose `scenarios[]` is
+   non-empty, after writing or editing any `@scenario_hash:<value>` tag in
+   a file under `features/`, you **must** recompute that hash by piping the
+   scenario block through the canonical `scenarios hash` CLI using
+   **scenario-block-only** canonicalization (the block-only form settled by
+   ADR-019 / scenario 117 — the enclosing `Feature:` line is NOT part of the
+   hashed text). The recomputed value **must equal** the `<value>` written
+   in the on-disk `@scenario_hash:<value>` tag, for **every** tag you wrote
+   or edited. This recompute-equality check also applies on a
+   `request_maintenance` dispatch whenever that maintenance touches a
+   `@scenario_hash` tag. You **may not** compose your **terminal response**
+   — the work-completion handoff to the Reviewer, or `shop-msg respond` on a
+   non-scenario-carrying path — while any `@scenario_hash` tag you touched
+   fails this recompute-equality check. This catches a fabricated or stale
+   hash at the implementer before the costly Reviewer round-trip (ADR-010 /
+   ADR-019).
+
 ## BC-root-only constraint
 
 Read and modify only files inside the BC root. (`shop-msg`, `bd`, and the
 vendored skills are installed/poured for you; their source living outside the
 BC is by design.)
 
-## Mechanism observations — pick the right channel
+## Surfacing mechanism observations
 
-Emit at most one *primary* response (`clarify` or `work_done`); a
+You may surface at most one *primary* response (`clarify` or `work_done`); a
 `mechanism_observation` may accompany it when its trigger genuinely fires.
+Pick the right channel:
 
 - A property of the scenario or work item itself (missing acceptance
-  criterion, ambiguous work_id) → **clarify**, not a mechanism observation.
-- An implementation block you cannot fix without further direction →
+  criterion, ambiguous work_id) routes to **clarify**, not a mechanism
+  observation.
+- An implementation block you cannot fix without further direction routes to
   **work_done(blocked)**, not a mechanism observation.
 - A load-bearing-but-out-of-scope property of the *mechanism* itself
-  (templates, schemas, role discipline, packages, the spec) →
-  **mechanism_observation** via `shop-msg respond mechanism_observation`.
-  Emitting it does not require a bd issue; `--provenance-ref` is optional.
+  (templates, schemas, role discipline, packages, the spec) is the
+  mechanism-observation trigger.
 
-Do not emit a mechanism_observation to "be helpful" or "be thorough" — if it
-is not load-bearing for the next BC dispatch, omit it.
+When the mechanism-observation trigger genuinely fires:
+
+1. **Surface the observation** by responding via `shop-msg respond mechanism_observation --bc <name> --work-id <work_id>` with the
+   load-bearing finding. Filing a bd issue is not a precondition;
+   `--provenance-ref` is optional.
+
+Do not surface a mechanism_observation to "be helpful" or "be thorough" — if
+it is not load-bearing for the next BC dispatch, omit it.
