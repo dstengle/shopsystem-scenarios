@@ -373,11 +373,15 @@ def then_hash_is_expected(expected_hash: str, context: dict) -> None:
 
 
 # =======================================================================
-# release_workflow.feature — the BC's own release pipeline fans out a
-# repository_dispatch to bc-launcher on a version-tag release. Unlike the
-# CLI/canonicalization scenarios this pins a property of a shipped
-# artifact (the workflow YAML), so the steps read .github/workflows/ from
-# disk and assert structurally rather than exercising runtime behaviour.
+# release_workflow.feature — the BC's release pipeline must NOT fan out a
+# per-repo repository_dispatch to bc-launcher. Per ADR-022, bc-base rebuilds
+# are driven by shopsystem-bc-launcher's own centralized scheduled poll, not
+# by a per-repo emit. This pins a property of a shipped artifact (the
+# workflow YAML): the *executable body* (YAML comment lines excluded) must
+# declare no repository_dispatch step targeting bc-launcher and reference no
+# BC_LAUNCHER_DISPATCH_TOKEN secret. A target/token reference present only in
+# a descriptive YAML comment must NOT fail the guarantee — so the steps strip
+# comment lines from the workflow source before inspecting the body.
 # =======================================================================
 
 
@@ -385,6 +389,46 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _DISPATCH_TARGET = "dstengle/shopsystem-bc-launcher"
 _DISPATCH_TOKEN_SECRET = "BC_LAUNCHER_DISPATCH_TOKEN"
+
+
+def _strip_yaml_comments(raw: str) -> str:
+    """Return the workflow's executable body with YAML comment lines removed.
+
+    A line whose first non-whitespace character is ``#`` is a standalone
+    comment and is dropped entirely. A trailing ``#`` comment on an otherwise
+    executable line is also stripped, but only when the ``#`` is not inside a
+    quoted scalar — so a literal ``#`` within a quoted string (e.g. a
+    client-payload JSON value) survives. This yields the "executable body,
+    with YAML comment lines excluded" the scenario inspects, so that a
+    repository_dispatch target or BC_LAUNCHER_DISPATCH_TOKEN reference present
+    only in a descriptive comment is absent from the body under inspection.
+    """
+    out_lines: list[str] = []
+    for line in raw.splitlines():
+        if line.lstrip().startswith("#"):
+            # Whole-line comment: drop it.
+            continue
+        out_lines.append(_strip_trailing_comment(line))
+    return "\n".join(out_lines)
+
+
+def _strip_trailing_comment(line: str) -> str:
+    """Strip a trailing ``# ...`` comment from a single line, respecting
+    single- and double-quoted scalars so a ``#`` inside a quoted value is
+    preserved."""
+    in_single = False
+    in_double = False
+    for i, ch in enumerate(line):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "#" and not in_single and not in_double:
+            # A YAML inline comment must be preceded by whitespace (or be at
+            # the start). Treat it as a comment only then.
+            if i == 0 or line[i - 1] in (" ", "\t"):
+                return line[:i].rstrip()
+    return line
 
 
 def _workflow_triggers(parsed: dict) -> dict:
@@ -441,94 +485,114 @@ def _step_targets_dispatch(step: dict) -> bool:
     return False
 
 
-@given("the shopsystem-scenarios framework-utility source repository")
-def given_source_repository(context: dict) -> None:
-    # The repository under test is this checkout; the scenario inspects
-    # the artifacts it ships rather than any installed package.
-    assert _REPO_ROOT.is_dir(), f"repo root not found: {_REPO_ROOT}"
-    context["repo_root"] = _REPO_ROOT
-
-
-@when(parsers.parse('its release workflow file under "{workflows_dir}" is inspected'))
-def when_inspect_workflow_files(workflows_dir: str, context: dict) -> None:
-    # Load every workflow definition under .github/workflows/ so the Then
-    # steps can select the release workflow by its trigger rather than by
-    # a hard-coded filename. The path comes from the Gherkin so the step
-    # and the prose stay in sync.
-    target_dir = context["repo_root"] / workflows_dir
-    assert target_dir.is_dir(), (
-        f"expected a workflows directory at {target_dir}; none found"
+@given(
+    parsers.parse('the shopsystem-scenarios release workflow at "{workflow_path}"')
+)
+def given_release_workflow_at(workflow_path: str, context: dict) -> None:
+    # The repository under test is this checkout; the scenario inspects the
+    # release workflow artifact it ships at the named path.
+    path = _REPO_ROOT / workflow_path
+    assert path.is_file(), (
+        f"expected the release workflow at {path}; none found"
     )
-    workflows = []
-    for path in sorted(target_dir.glob("*.y*ml")):
-        raw = path.read_text(encoding="utf-8")
-        workflows.append((path, raw, yaml.safe_load(raw)))
-    assert workflows, f"no workflow files found under {target_dir}"
-    context["workflows"] = workflows
+    context["release_workflow_path"] = path
+    context["release_workflow_raw"] = path.read_text(encoding="utf-8")
 
 
-@then(parsers.parse('the workflow declares a trigger on push of tags matching "{pattern}"'))
-def then_workflow_triggers_on_tag_push(pattern: str, context: dict) -> None:
-    # The release workflow is the one whose push.tags would match a
-    # v-prefixed version tag (e.g. v1.2.3) via the declared glob. Select
-    # it here so the remaining Then steps inspect that same workflow.
-    matches = []
-    for path, raw, parsed in context["workflows"]:
-        for tag_glob in _push_tag_patterns(parsed):
-            if tag_glob == pattern and fnmatch.fnmatch("v1.2.3", tag_glob):
-                matches.append((path, raw, parsed))
-                break
-    assert matches, (
-        f"no workflow under .github/workflows/ declares a push trigger on "
-        f"tags matching {pattern!r}; "
-        f"inspected: {[p.name for p, _, _ in context['workflows']]}"
+@given(
+    "bc-base rebuilds are driven by shopsystem-bc-launcher's own centralized "
+    "scheduled poll per ADR-022, not by a per-repo repository_dispatch emit"
+)
+def given_rebuilds_driven_by_central_poll(context: dict) -> None:
+    # Documents the ADR-022 rationale for the guarantee; no state to set up
+    # beyond the workflow already loaded by the prior Given.
+    assert "release_workflow_raw" in context, (
+        "release workflow must be loaded before this Given"
     )
-    assert len(matches) == 1, (
-        f"expected exactly one release workflow with a {pattern!r} tag "
-        f"trigger; found {[p.name for p, _, _ in matches]}"
-    )
-    context["release_workflow"] = matches[0]
+
+
+@when(
+    "the release workflow's executable body, with YAML comment lines "
+    "excluded, is inspected on a version-tag release"
+)
+def when_inspect_executable_body(context: dict) -> None:
+    # Strip YAML comment lines so that a repository_dispatch target or token
+    # reference living only in a descriptive comment is absent from the body
+    # under inspection. Parse the stripped body so the structural Then steps
+    # inspect the same comment-free executable body the text assertions do.
+    raw = context["release_workflow_raw"]
+    executable_body = _strip_yaml_comments(raw)
+    context["executable_body"] = executable_body
+    context["executable_parsed"] = yaml.safe_load(executable_body)
 
 
 @then(
     parsers.parse(
-        'the workflow contains a step that performs a "{dispatch_type}" '
-        'targeting the "{target}" repository, satisfied by either a REST '
-        "call to the GitHub repository-dispatches API or a use of the "
-        '"{action}" action'
+        "the executable body declares no step performing a "
+        'repository_dispatch targeting "{target}"'
     )
 )
-def then_workflow_dispatches_to_target(
-    dispatch_type: str, target: str, action: str, context: dict
-) -> None:
-    assert dispatch_type == "repository_dispatch", dispatch_type
+def then_no_dispatch_step_targeting(target: str, context: dict) -> None:
     assert target == _DISPATCH_TARGET, target
-    _, _, parsed = context["release_workflow"]
+    parsed = context["executable_parsed"]
     dispatch_steps = [s for s in _iter_steps(parsed) if _step_targets_dispatch(s)]
-    assert dispatch_steps, (
-        f"release workflow declares no step performing a {dispatch_type} to "
-        f"{target!r} (via the {action!r} action or a REST call to the "
-        "repository-dispatches API)"
+    assert not dispatch_steps, (
+        f"release workflow's executable body declares "
+        f"{len(dispatch_steps)} step(s) performing a repository_dispatch "
+        f"targeting {target!r}; ADR-022 requires none. Offending step(s):\n"
+        + "\n".join(yaml.safe_dump(s) for s in dispatch_steps)
     )
-    assert len(dispatch_steps) == 1, (
-        f"expected exactly one dispatch step targeting {target!r}; "
-        f"found {len(dispatch_steps)}"
+    # Belt-and-suspenders: the raw dispatch target string must also be absent
+    # from the comment-stripped executable body text (covers REST forms the
+    # structural scan might not classify as a step).
+    body = context["executable_body"]
+    assert target not in body, (
+        f"release workflow's executable body references the "
+        f"repository_dispatch target {target!r}; ADR-022 requires none.\n"
+        f"executable body was:\n{body}"
     )
-    context["dispatch_step"] = dispatch_steps[0]
 
 
-@then(parsers.parse('that step references the secret "{secret}" as the dispatch token'))
-def then_dispatch_step_references_secret(secret: str, context: dict) -> None:
+@then(
+    parsers.parse('the executable body references no secret named "{secret}"')
+)
+def then_no_token_secret_reference(secret: str, context: dict) -> None:
     assert secret == _DISPATCH_TOKEN_SECRET, secret
-    step = context["dispatch_step"]
-    # Serialise the matched step back to text so the assertion covers the
-    # secret reference wherever it lives — `with.token` for the action
-    # form, or an Authorization header / env var for the REST form.
-    step_text = yaml.safe_dump(step)
-    needle = f"secrets.{secret}"
-    assert needle in step_text, (
-        f"dispatch step does not reference the secret {secret!r} "
-        f"(expected a ${{{{ {needle} }}}} reference); step was:\n{step_text}"
+    body = context["executable_body"]
+    assert secret not in body, (
+        f"release workflow's executable body references the secret "
+        f"{secret!r}; ADR-022 requires no per-repo dispatch token. "
+        f"executable body was:\n{body}"
+    )
+
+
+@then(
+    "a repository_dispatch target or BC_LAUNCHER_DISPATCH_TOKEN reference "
+    "present only in a descriptive YAML comment, absent from the executable "
+    "body, does not fail this guarantee"
+)
+def then_comment_only_reference_is_tolerated(context: dict) -> None:
+    # Prove the comment-stripping is load-bearing: inject a comment line that
+    # names both the dispatch target and the token secret into the loaded
+    # workflow source, re-derive the executable body, and confirm neither the
+    # target nor the secret survives into the comment-stripped body. A
+    # reference confined to a comment must NOT fail the guarantee.
+    raw = context["release_workflow_raw"]
+    probe = (
+        f"# historical note: this repo once dispatched to {_DISPATCH_TARGET} "
+        f"using the {_DISPATCH_TOKEN_SECRET} secret; removed per ADR-022\n"
+    )
+    augmented = probe + raw
+    body = _strip_yaml_comments(augmented)
+    assert _DISPATCH_TARGET not in body, (
+        f"comment-only mention of {_DISPATCH_TARGET!r} leaked into the "
+        f"executable body; comment stripping is not load-bearing.\n"
+        f"body was:\n{body}"
+    )
+    assert _DISPATCH_TOKEN_SECRET not in body, (
+        f"comment-only mention of {_DISPATCH_TOKEN_SECRET!r} leaked into the "
+        f"executable body; comment stripping is not load-bearing.\n"
+        f"body was:\n{body}"
     )
 
 

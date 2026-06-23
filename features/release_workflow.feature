@@ -1,9 +1,10 @@
 Feature: shopsystem-scenarios — release and packaging contracts
 
-  @scenario_hash:a9f11f0f3bc72dc4 @bc:shopsystem-scenarios
-  Scenario: shopsystem-scenarios' release workflow declares a repository_dispatch emit to the bc-launcher repository on a version-tag release
-    Given the shopsystem-scenarios framework-utility source repository
-    When its release workflow file under ".github/workflows/" is inspected
-    Then the workflow declares a trigger on push of tags matching "v*"
-    And the workflow contains a step that performs a "repository_dispatch" targeting the "dstengle/shopsystem-bc-launcher" repository, satisfied by either a REST call to the GitHub repository-dispatches API or a use of the "peter-evans/repository-dispatch" action
-    And that step references the secret "BC_LAUNCHER_DISPATCH_TOKEN" as the dispatch token
+  @scenario_hash:f49eaa943ed4fb3b @bc:shopsystem-scenarios
+  Scenario: shopsystem-scenarios release workflow declares NO repository_dispatch emit to shopsystem-bc-launcher and references NO BC_LAUNCHER_DISPATCH_TOKEN
+    Given the shopsystem-scenarios release workflow at ".github/workflows/release.yml"
+    And bc-base rebuilds are driven by shopsystem-bc-launcher's own centralized scheduled poll per ADR-022, not by a per-repo repository_dispatch emit
+    When the release workflow's executable body, with YAML comment lines excluded, is inspected on a version-tag release
+    Then the executable body declares no step performing a repository_dispatch targeting "dstengle/shopsystem-bc-launcher"
+    And the executable body references no secret named "BC_LAUNCHER_DISPATCH_TOKEN"
+    And a repository_dispatch target or BC_LAUNCHER_DISPATCH_TOKEN reference present only in a descriptive YAML comment, absent from the executable body, does not fail this guarantee

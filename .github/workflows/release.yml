@@ -1,23 +1,17 @@
 name: release
 
-# On a version-tag release, notify the bc-launcher repository so it can
-# rebuild downstream bounded contexts against the newly published
-# scenarios package. The dispatch token is a fine-grained PAT with
-# contents:read + a repository-dispatch scope on shopsystem-bc-launcher,
-# stored as the BC_LAUNCHER_DISPATCH_TOKEN secret in this repository.
+# Per ADR-022, bc-base rebuilds are driven by shopsystem-bc-launcher's own
+# centralized scheduled poll, not by a per-repo emit from this workflow on
+# release. This workflow therefore performs no cross-repo dispatch; the
+# version-tag trigger is retained as the release hook for in-repo steps.
 on:
   push:
     tags:
       - "v*"
 
 jobs:
-  notify-bc-launcher:
+  release:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch bc-launcher rebuild
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.BC_LAUNCHER_DISPATCH_TOKEN }}
-          repository: dstengle/shopsystem-bc-launcher
-          event-type: scenarios-released
-          client-payload: '{"ref": "${{ github.ref }}", "sha": "${{ github.sha }}"}'
+      - name: Mark release
+        run: echo "shopsystem-scenarios ${GITHUB_REF_NAME} released"
