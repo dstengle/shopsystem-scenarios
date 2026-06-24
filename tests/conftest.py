@@ -1628,3 +1628,241 @@ def then_empty_read_is_success_not_error(context: dict) -> None:
         f"expected a definite empty-set answer on success; got "
         f"{context['completed_set']!r}"
     )
+
+
+# =======================================================================
+# editable_install_guard.feature — pytest collection must FAIL FAST when a
+# stale, non-editable `scenarios` wheel under site-packages shadows the
+# workspace `src/scenarios/` checkout (bead cdi). The guard is a
+# collection-time conftest hook that calls a single extracted guard
+# function; these step defs unit-test that function directly (the cleaner,
+# more reliable mechanism the dispatch prefers) so both the hook and the
+# tests share one implementation. The guard function does not yet exist —
+# importing `scenarios._editable_guard.check_editable_install` is what makes
+# BOTH scenarios genuinely RED until GREEN, so neither passes vacuously.
+#
+# Guard function contract (established by THIS behavior, which the GREEN
+# conftest hook must conform to):
+#   check_editable_install(
+#       package_name: str,
+#       resolved_package_file: Path,   # the on-disk file `import scenarios`
+#                                       # actually resolved to (its __file__)
+#       workspace_src_dir: Path,       # the workspace "src" dir the package
+#                                       # is expected to resolve under
+#   ) -> None
+# Raises a collection-blocking error (a pytest.UsageError, which aborts
+# collection before any test runs) when resolved_package_file is NOT located
+# under workspace_src_dir (i.e. a non-editable site-packages copy is
+# shadowing src/). The error message must (a) name the package and its
+# resolved (site-packages) path, (b) state the workspace "src/" path the
+# package was expected to resolve under, and (c) include the literal
+# remediation "pip install -e .". Returns None (raises nothing) when the
+# resolved file IS under workspace_src_dir.
+# =======================================================================
+
+
+@given(
+    'a clean checkout whose "scenarios" package is importable from the '
+    'workspace "src/scenarios/"'
+)
+def given_clean_checkout_src_importable(context: dict, tmp_path) -> None:
+    # Model a clean checkout's workspace layout under tmp_path: a "src" dir
+    # containing a "scenarios" package. The guard is path-based, so a faithful
+    # on-disk layout (not the live import) is what the unit test exercises.
+    src_dir = tmp_path / "src"
+    pkg_dir = src_dir / "scenarios"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text(
+        '"""workspace scenarios package."""\n', encoding="utf-8"
+    )
+    # A module present in the workspace src/ package that the stale wheel
+    # below will lack — this is the "lacks modules present in src/scenarios/"
+    # shadow condition the scenario names.
+    (pkg_dir / "journal.py").write_text(
+        '"""present in src/scenarios/, absent from the stale wheel."""\n',
+        encoding="utf-8",
+    )
+    context["package_name"] = "scenarios"
+    context["workspace_src_dir"] = src_dir
+    context["src_pkg_dir"] = pkg_dir
+
+
+@given(
+    'a non-editable "scenarios" wheel under site-packages that shadows '
+    '"src/scenarios/" and lacks modules present in "src/scenarios/"'
+)
+def given_stale_wheel_shadows_src(context: dict, tmp_path) -> None:
+    # A non-editable wheel: a "scenarios" package living under a
+    # site-packages directory OUTSIDE the workspace src/ tree. It lacks the
+    # journal.py module the workspace src/ package has, modelling the stale
+    # shadow. The guard resolves the import to THIS file, so this is the
+    # resolved_package_file the guard must reject.
+    site_packages = tmp_path / "site-packages"
+    stale_pkg_dir = site_packages / "scenarios"
+    stale_pkg_dir.mkdir(parents=True)
+    stale_init = stale_pkg_dir / "__init__.py"
+    stale_init.write_text(
+        '"""stale non-editable scenarios wheel (shadows src/)."""\n',
+        encoding="utf-8",
+    )
+    # Guard the shadow premise: the stale wheel genuinely lacks a module the
+    # workspace src/ package ships, so it is a real (lossy) shadow.
+    assert (context["src_pkg_dir"] / "journal.py").exists(), (
+        "fixture invariant: workspace src/scenarios/ must ship journal.py"
+    )
+    assert not (stale_pkg_dir / "journal.py").exists(), (
+        "fixture invariant: the stale wheel must LACK journal.py to model a "
+        "lossy shadow of src/scenarios/"
+    )
+    context["site_packages_dir"] = site_packages
+    # The file `import scenarios` would resolve to under the shadow: the stale
+    # wheel's __init__.py, NOT the workspace src/ copy.
+    context["resolved_package_file"] = stale_init
+
+
+@given(
+    'a clean checkout whose "scenarios" package resolves from the workspace '
+    '"src/scenarios/" editable install'
+)
+def given_clean_checkout_editable(context: dict, tmp_path) -> None:
+    # The correct editable install: `import scenarios` resolves to the
+    # workspace src/scenarios/__init__.py. Build the same faithful layout and
+    # record the workspace-src __init__.py as the resolved file.
+    src_dir = tmp_path / "src"
+    pkg_dir = src_dir / "scenarios"
+    pkg_dir.mkdir(parents=True)
+    init = pkg_dir / "__init__.py"
+    init.write_text('"""workspace scenarios package."""\n', encoding="utf-8")
+    context["package_name"] = "scenarios"
+    context["workspace_src_dir"] = src_dir
+    context["src_pkg_dir"] = pkg_dir
+    context["resolved_package_file"] = init
+
+
+@given('no non-editable site-packages copy shadows "src/scenarios/"')
+def given_no_shadow(context: dict) -> None:
+    # No shadow: the resolved file is the workspace src/ copy recorded by the
+    # prior Given. Guard that premise — the resolved file must be under the
+    # workspace src/ dir, so the guard's clean path is genuinely exercised.
+    resolved = context["resolved_package_file"]
+    src_dir = context["workspace_src_dir"]
+    assert src_dir in resolved.resolve().parents, (
+        "fixture invariant: the resolved package file must be under the "
+        f"workspace src dir for the no-shadow scenario; resolved={resolved!r} "
+        f"src_dir={src_dir!r}"
+    )
+
+
+@when("pytest collection runs the conftest editable-install guard")
+def when_run_editable_guard(context: dict) -> None:
+    # The guard hook calls this single extracted function. Importing it is
+    # what makes both scenarios RED until GREEN: scenarios._editable_guard
+    # does not exist yet, so this import raises ModuleNotFoundError and the
+    # When step fails for the RIGHT reason (guard absent), not a vacuous pass.
+    from scenarios._editable_guard import check_editable_install
+
+    try:
+        check_editable_install(
+            context["package_name"],
+            context["resolved_package_file"],
+            context["workspace_src_dir"],
+        )
+        context["guard_error"] = None
+    except Exception as exc:  # noqa: BLE001 — the guard's raise IS the behavior
+        context["guard_error"] = exc
+
+
+@then("collection fails before any test runs")
+def then_collection_fails(context: dict) -> None:
+    err = context["guard_error"]
+    assert err is not None, (
+        "expected the guard to FAIL collection (raise a collection-blocking "
+        "error) when a stale site-packages wheel shadows src/scenarios/; it "
+        "raised nothing"
+    )
+    # A collection-blocking error aborts before any test runs. pytest's
+    # canonical collection-abort signal is UsageError; require that type so a
+    # generic exception that pytest would surface as a test error (not a
+    # collection abort) does not satisfy the scenario.
+    assert isinstance(err, pytest.UsageError), (
+        f"expected a pytest.UsageError to abort collection before any test "
+        f"runs; got {type(err).__name__}: {err!r}"
+    )
+
+
+@then(
+    'the failure message names the "scenarios" package and its resolved '
+    "site-packages path"
+)
+def then_message_names_package_and_resolved_path(context: dict) -> None:
+    err = context["guard_error"]
+    assert err is not None, "expected the guard to have raised"
+    message = str(err)
+    assert context["package_name"] in message, (
+        f"expected the failure message to name the {context['package_name']!r} "
+        f"package; got:\n{message}"
+    )
+    # The resolved site-packages path: the stale wheel's location must appear
+    # so the operator can see WHAT is shadowing. Accept either the resolved
+    # file or its site-packages directory in the message.
+    resolved = context["resolved_package_file"]
+    assert (
+        str(resolved) in message or str(context["site_packages_dir"]) in message
+    ), (
+        f"expected the failure message to state the resolved site-packages "
+        f"path ({resolved!r} or {context['site_packages_dir']!r}); got:\n{message}"
+    )
+
+
+@then(
+    'the failure message states the workspace "src/" path the package was '
+    "expected to resolve under"
+)
+def then_message_states_expected_src_path(context: dict) -> None:
+    err = context["guard_error"]
+    assert err is not None, "expected the guard to have raised"
+    message = str(err)
+    src_dir = context["workspace_src_dir"]
+    assert str(src_dir) in message, (
+        f"expected the failure message to state the workspace src path "
+        f"{str(src_dir)!r} the package was expected to resolve under; "
+        f"got:\n{message}"
+    )
+
+
+@then('the failure message includes the remediation "pip install -e ."')
+def then_message_includes_remediation(context: dict) -> None:
+    err = context["guard_error"]
+    assert err is not None, "expected the guard to have raised"
+    message = str(err)
+    assert "pip install -e ." in message, (
+        f"expected the failure message to include the literal remediation "
+        f'"pip install -e ."; got:\n{message}'
+    )
+
+
+@then("the guard raises no error")
+def then_guard_raises_no_error(context: dict) -> None:
+    err = context["guard_error"]
+    assert err is None, (
+        "expected the guard to raise NO error under a correct editable install "
+        f"with no shadow; it raised {type(err).__name__}: {err!r}"
+    )
+
+
+@then('collection proceeds and the test suite runs against "src/scenarios/"')
+def then_collection_proceeds_against_src(context: dict) -> None:
+    # Collection proceeding is the guard returning None (no raise) AND the
+    # resolved file being the workspace src/ copy — so the suite runs against
+    # src/scenarios/, not a shadowing wheel. Re-assert both to pin that the
+    # pass-through is genuine, not a guard that silently accepts everything.
+    assert context["guard_error"] is None, (
+        "expected no guard error so collection can proceed"
+    )
+    resolved = context["resolved_package_file"]
+    src_dir = context["workspace_src_dir"]
+    assert src_dir in resolved.resolve().parents, (
+        f"expected the suite to run against src/scenarios/ — the resolved "
+        f"package file {resolved!r} must be under the workspace src dir "
+        f"{src_dir!r}"
+    )
