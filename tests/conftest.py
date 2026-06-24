@@ -24,6 +24,61 @@ from scenarios.hash import compute_scenario_hash
 
 
 # -----------------------------------------------------------------------
+# Collection-time editable-install / stale-wheel guard (bead cdi / hb2.2)
+# -----------------------------------------------------------------------
+#
+# A real collection-time hook that fails fast when a stale, non-editable
+# `scenarios` wheel under site-packages shadows this repo's workspace
+# `src/scenarios/` checkout. It computes the real `scenarios` package's
+# resolved `__file__` and the workspace `src/` dir and delegates to the
+# single extracted guard the editable_install_guard.feature scenarios
+# unit-test, so the hook and those tests share one implementation.
+#
+# Under the correct `PYTHONPATH=src` invocation `import scenarios` resolves
+# to <repo>/src/scenarios/__init__.py, which IS under <repo>/src — so the
+# guard returns cleanly and this hook does NOT abort the suite's own
+# collection. It only aborts when the resolved file lies outside the
+# workspace src/ (i.e. a genuine site-packages shadow).
+
+
+def pytest_configure(config) -> None:  # noqa: ARG001 — pytest hook signature
+    import importlib.util
+
+    import scenarios
+
+    repo_root = Path(__file__).resolve().parent.parent
+    workspace_src_dir = repo_root / "src"
+
+    # Load the guard FROM the workspace src/ file by path — NOT via the
+    # `scenarios` package namespace. Were we to `from scenarios._editable_guard
+    # import ...`, a stale site-packages wheel shadowing src/ (the exact
+    # failure this guard exists to catch) would lack the module and raise an
+    # opaque ModuleNotFoundError before the guard could run. Loading by path
+    # keeps the guard authoritative even when `import scenarios` resolves to
+    # the shadow.
+    guard_src = workspace_src_dir / "scenarios" / "_editable_guard.py"
+    spec = importlib.util.spec_from_file_location(
+        "scenarios._editable_guard_conftest", guard_src
+    )
+    guard_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard_mod)
+
+    try:
+        guard_mod.check_editable_install(
+            "scenarios",
+            Path(scenarios.__file__).resolve(),
+            workspace_src_dir,
+        )
+    except pytest.UsageError as exc:
+        # The extracted guard raises pytest.UsageError (the type the
+        # editable_install_guard.feature scenarios pin). From within
+        # pytest_configure, render that remediation message and abort the
+        # session cleanly before any test runs (returncode 4 = usage error)
+        # rather than letting it surface as an opaque INTERNALERROR.
+        pytest.exit(str(exc), returncode=4)
+
+
+# -----------------------------------------------------------------------
 # Shared cross-step state
 # -----------------------------------------------------------------------
 
