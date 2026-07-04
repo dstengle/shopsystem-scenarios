@@ -436,7 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
             "it: exit non-zero while any file is non-conformant (a per-file "
             "schema violation) or any Feature carries a transitional marker "
             "(@bc:unassigned -> W_BC_UNASSIGNED, @origin:unresolved -> "
-            "W_ORIGIN_UNRESOLVED); exit 0 only when the corpus is entirely clean"
+            "W_ORIGIN_UNRESOLVED) or any legacy .gherkin file remains "
+            "(E_STRAY_GHERKIN); exit 0 only when the corpus is entirely clean"
         ),
     )
     validate_cmd.set_defaults(func=_cmd_validate)

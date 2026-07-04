@@ -863,9 +863,12 @@ def validate_corpus(
     RED and is reported with its stable E_ code and file), AND scanned for the
     two transitional markers (@bc:unassigned / @origin:unresolved), which are
     legal per-file placeholders but keep the aggregate gate RED as
-    W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED. The corpus is gated GREEN (exit 0)
-    only when it is entirely free of both per-file violations and transitional
-    markers.
+    W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED. The tree is ALSO scanned for legacy
+    ``.gherkin`` files: any that remain keep the gate RED as E_STRAY_GHERKIN
+    (lead-vzxd.7 defect D), so an unmigrated file cannot hide behind the
+    ``*.feature`` glob. The corpus is gated GREEN (exit 0) only when it is
+    entirely free of per-file violations, transitional markers, AND stray
+    ``.gherkin`` files.
     """
     result = AggregateResult()
 
