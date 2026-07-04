@@ -360,6 +360,17 @@ class Validator:
                     ),
                 )
             )
+        else:
+            (bc_value,) = bc_values
+            if bc_value not in self.legal_bcs:
+                result.add(
+                    Violation(
+                        rule=E_UNKNOWN_BC,
+                        line=feature_line,
+                        bc=bc_value,
+                        detail=f"@bc value {bc_value!r} is not a known context",
+                    )
+                )
 
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
