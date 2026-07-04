@@ -37,6 +37,7 @@ from gherkin.parser import Parser
 from gherkin.token_scanner import TokenScanner
 
 from scenarios.hash import compute_scenario_hash
+from scenarios.outstanding import _iter_scenario_blocks, compute_block_only_hash
 
 # ----------------------------------------------------------------------------
 # Stable rule codes.
@@ -70,6 +71,16 @@ E_UNKNOWN_SERVICE = "E_UNKNOWN_SERVICE"
 # (warning/marker) prefix, distinct from the per-file E_ codes.
 W_BC_UNASSIGNED = "W_BC_UNASSIGNED"
 W_ORIGIN_UNRESOLVED = "W_ORIGIN_UNRESOLVED"
+
+# A stray legacy ``.gherkin`` file under the corpus dir (lead-vzxd.7 defect D).
+# ``--aggregate`` globs ``*.feature`` only, so an unmigrated ``.gherkin`` file
+# is INVISIBLE to the per-file gate — leaving the aggregate gate satisfiable by
+# simply not migrating a file. This finding keeps the gate RED while ANY
+# ``.gherkin`` remains under the corpus dir, naming the stray file, so the
+# migration cannot be silently skipped. It is a corpus-level guard (like the
+# W_ markers) rather than a per-file schema rule, but it is a hard error (E_):
+# a stray ``.gherkin`` is a migration DEFECT, not a transitional placeholder.
+E_STRAY_GHERKIN = "E_STRAY_GHERKIN"
 
 # Protocol @bc tokens that are legal owners but are NOT Bounded Contexts, so
 # they live in code rather than in the bc-manifest.yaml bcs registry (ADR-056
@@ -433,51 +444,58 @@ class Validator:
     ) -> ValidationResult:
         result = ValidationResult(file=file)
 
-        # Feature cardinality is decided by a line scan BEFORE trusting the
-        # parser, because off-the-shelf strict Gherkin raises on both zero
-        # Feature (a Scenario with no enclosing Feature) and a second Feature.
-        # A raw parse error would collapse both distinct schema violations
-        # (E_NO_FEATURE, E_MULTI_FEATURE) into E_GHERKIN_PARSE and lose the
-        # distinction the schema requires. The line scan recovers the intended
-        # cardinality diagnostic; a single-Feature file then goes to the parser
-        # for the genuine E_GHERKIN_PARSE path.
-        # Feature cardinality is decided by a line scan BEFORE trusting the
-        # parser. Off-the-shelf strict Gherkin raises on a file with scenarios
-        # but no enclosing Feature, which would collapse the intended
-        # E_NO_FEATURE diagnostic into a generic E_GHERKIN_PARSE. The line scan
-        # recovers the schema-level cardinality diagnostic; a single-Feature
-        # file still goes to the parser below for the genuine parse path.
-        feature_count = self._count_feature_lines(text)
-        if feature_count == 0:
+        # Feature cardinality is decided by the gherkin-official PARSER's
+        # Feature-node count, NOT a raw ``Feature:`` line scan (lead-vzxd.7
+        # defect B). A valid single Feature whose DESCRIPTION prose contains the
+        # substring "Feature:" parses to exactly ONE Feature node; a raw line
+        # scan would miscount it as two and fire a false E_MULTI_FEATURE. So the
+        # parser is the authority on cardinality.
+        #
+        # Off-the-shelf strict Gherkin RAISES on both zero Feature (an orphan
+        # Scenario with no enclosing Feature) and a genuine second Feature, and
+        # both raise the SAME exception — so a parse failure alone cannot tell
+        # E_NO_FEATURE from E_MULTI_FEATURE from a genuine E_GHERKIN_PARSE. The
+        # ``Feature:`` line scan is retained SOLELY as the disambiguator on a
+        # parse failure: line-count 0 -> E_NO_FEATURE, line-count >= 2 ->
+        # E_MULTI_FEATURE, else a genuine E_GHERKIN_PARSE. A file that PARSES
+        # never consults the line scan, so prose containing "Feature:" cannot
+        # trip a cardinality violation.
+        try:
+            document = self._parse(text)
+        except (CompositeParserException, ParserException) as exc:
+            feature_line_count = self._count_feature_lines(text)
+            if feature_line_count == 0:
+                result.add(
+                    Violation(
+                        rule=E_NO_FEATURE,
+                        detail="file declares no Feature keyword",
+                    )
+                )
+            elif feature_line_count > 1:
+                result.add(
+                    Violation(
+                        rule=E_MULTI_FEATURE,
+                        detail=(
+                            f"file declares {feature_line_count} Feature "
+                            "keywords (expected exactly one)"
+                        ),
+                    )
+                )
+            else:
+                first_line = str(exc).splitlines()[0] if str(exc) else None
+                result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
+            return result
+
+        # The file parsed. A parsed document with NO Feature node (e.g. an empty
+        # or comment-only file) is E_NO_FEATURE — off-the-shelf gherkin returns
+        # a document whose ``feature`` is None rather than raising in that case.
+        if document.get("feature") is None:
             result.add(
                 Violation(
                     rule=E_NO_FEATURE,
                     detail="file declares no Feature keyword",
                 )
             )
-            return result
-        if feature_count > 1:
-            result.add(
-                Violation(
-                    rule=E_MULTI_FEATURE,
-                    detail=(
-                        f"file declares {feature_count} Feature keywords "
-                        "(expected exactly one)"
-                    ),
-                )
-            )
-            return result
-
-        # Off-the-shelf gherkin-official raises CompositeParserException (or a
-        # bare ParserException) on un-parseable input. Catch it and map it to a
-        # single E_GHERKIN_PARSE violation so the CLI reports a clean diagnostic
-        # instead of crashing with a traceback (ADR-056). The parser's first
-        # error line is carried as detail for the reader.
-        try:
-            document = self._parse(text)
-        except (CompositeParserException, ParserException) as exc:
-            first_line = str(exc).splitlines()[0] if str(exc) else None
-            result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
             return result
 
         # A feature-level @bc_internal tag marks the whole file as BC-INTERNAL
@@ -494,8 +512,13 @@ class Validator:
         # Exactly one Feature and the file parses. Now the tag-dimension rules
         # (slice 1b) run on the parsed GherkinDocument, ACCRETING every
         # violation they find (they do not early-return) so a file with several
-        # independent defects reports them all in one run.
-        self._check_tags(document, result)
+        # independent defects reports them all in one run. The raw ``text`` is
+        # threaded through so the per-scenario hash recompute can hash each
+        # scenario's RAW block (Examples table retained, keyword preserved) via
+        # the SAME block-extraction/canonicalization path ``scenarios hash``
+        # uses — guaranteeing recompute == ``scenarios hash`` on the raw block
+        # for both ``Scenario`` and ``Scenario Outline`` (lead-vzxd.7 defect A).
+        self._check_tags(document, result, text=text)
         return result
 
     def _feature_is_bc_internal(self, document: dict) -> bool:
@@ -522,7 +545,9 @@ class Validator:
         prefix = f"@{dimension}:"
         return [t[len(prefix):] for t in tag_names if t.startswith(prefix)]
 
-    def _check_tags(self, document: dict, result: ValidationResult) -> None:
+    def _check_tags(
+        self, document: dict, result: ValidationResult, *, text: str = ""
+    ) -> None:
         feature = document.get("feature")
         if feature is None:
             return
@@ -623,24 +648,51 @@ class Validator:
                 )
 
         # -- @scenario_hash: per-scenario, present -------------------------
-        for child in feature.get("children", []):
-            scenario = child.get("scenario")
-            if scenario is None:
-                continue
-            self._check_scenario_hash(scenario, result)
+        # Extract each scenario's RAW block from the file text via the SAME
+        # block-extraction path ``scenarios hash`` uses (``_iter_scenario_blocks``
+        # opens on ``Scenario:``/``Scenario Outline:`` and runs to the next
+        # boundary, so a Scenario Outline's Examples table is part of its block).
+        # The raw blocks come in file order and pair positionally with the
+        # parser's scenario children (also file order; a Background is neither a
+        # raw block nor a scenario child, so the two sequences stay aligned).
+        raw_blocks = list(_iter_scenario_blocks(text)) if text else []
+        scenario_children = [
+            child["scenario"]
+            for child in feature.get("children", [])
+            if child.get("scenario") is not None
+        ]
+        for index, scenario in enumerate(scenario_children):
+            raw_block = raw_blocks[index] if index < len(raw_blocks) else None
+            self._check_scenario_hash(scenario, result, raw_block=raw_block)
 
     @staticmethod
     def _reconstruct_block(scenario: dict) -> str:
-        """The block-only body of a parsed scenario: ``Scenario: <name>`` plus
-        one ``<keyword> <text>`` line per step. This is the parser-path input
-        to ``compute_scenario_hash`` — the same canonical form the block-only
-        hash is defined over."""
-        lines = [f"Scenario: {scenario['name']}"]
+        """The block-only body of a parsed scenario reconstructed from the
+        parser node: the scenario keyword line plus one ``<keyword> <text>``
+        line per step. This is a FALLBACK used only when the raw file text is
+        unavailable to the per-scenario hash check; the primary path hashes the
+        scenario's RAW block (via ``compute_block_only_hash``), which is what
+        ``scenarios hash`` does.
+
+        This fallback preserves the parsed scenario's own keyword
+        (``Scenario`` vs ``Scenario Outline``) rather than normalizing it, so
+        that even without the raw text it does not silently disagree with the
+        canonical hash on the keyword. It still cannot reproduce a Scenario
+        Outline's Examples table (the parser node does not carry it verbatim),
+        which is exactly why the raw-block path is the primary one."""
+        keyword = (scenario.get("keyword") or "Scenario").strip()
+        lines = [f"{keyword}: {scenario['name']}"]
         for step in scenario.get("steps", []):
             lines.append(f"{step['keyword'].strip()} {step['text']}")
         return "\n".join(lines)
 
-    def _check_scenario_hash(self, scenario: dict, result: ValidationResult) -> None:
+    def _check_scenario_hash(
+        self,
+        scenario: dict,
+        result: ValidationResult,
+        *,
+        raw_block: Optional[str] = None,
+    ) -> None:
         scenario_tags = self._tag_names(scenario)
         title = scenario.get("name")
         line = scenario.get("location", {}).get("line")
@@ -659,10 +711,20 @@ class Validator:
             return
 
         # Compare the embedded hash against the block-only hash recomputed over
-        # the scenario's parser-path body. On mismatch the diagnostic names the
-        # scenario together with BOTH the embedded and the recomputed hash.
+        # the scenario's RAW block — the SAME value ``scenarios hash`` produces
+        # on that block. Hashing the raw block via ``compute_block_only_hash``
+        # RETAINS a Scenario Outline's Examples table and preserves the
+        # ``Scenario Outline`` keyword, so the recompute EQUALS ``scenarios
+        # hash`` on the raw block for both ``Scenario`` and ``Scenario Outline``
+        # (lead-vzxd.7 defect A). When no raw block is available (a caller that
+        # did not thread the file text), fall back to the parser-node
+        # reconstruction. On mismatch the diagnostic names the scenario together
+        # with BOTH the embedded and the recomputed hash.
         embedded = hash_values[0]
-        recomputed = compute_scenario_hash(self._reconstruct_block(scenario))
+        if raw_block is not None:
+            recomputed = compute_block_only_hash(raw_block)
+        else:
+            recomputed = compute_scenario_hash(self._reconstruct_block(scenario))
         if embedded != recomputed:
             result.add(
                 Violation(
@@ -750,6 +812,12 @@ class AggregateResult:
 # gated as one whole.
 _FEATURE_GLOB = "*.feature"
 
+# The legacy pre-migration extension. A corpus is fully migrated only when it
+# carries ZERO of these; the aggregate gate goes RED (E_STRAY_GHERKIN) while any
+# remain, so an unmigrated file cannot hide behind the ``*.feature`` glob
+# (lead-vzxd.7 defect D).
+_STRAY_GLOB = "*.gherkin"
+
 
 def _corpus_file_is_bc_internal(path: Path) -> bool:
     """True iff the feature file at ``path`` carries the @bc_internal exemption.
@@ -795,11 +863,32 @@ def validate_corpus(
     RED and is reported with its stable E_ code and file), AND scanned for the
     two transitional markers (@bc:unassigned / @origin:unresolved), which are
     legal per-file placeholders but keep the aggregate gate RED as
-    W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED. The corpus is gated GREEN (exit 0)
-    only when it is entirely free of both per-file violations and transitional
-    markers.
+    W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED. The tree is ALSO scanned for legacy
+    ``.gherkin`` files: any that remain keep the gate RED as E_STRAY_GHERKIN
+    (lead-vzxd.7 defect D), so an unmigrated file cannot hide behind the
+    ``*.feature`` glob. The corpus is gated GREEN (exit 0) only when it is
+    entirely free of per-file violations, transitional markers, AND stray
+    ``.gherkin`` files.
     """
     result = AggregateResult()
+
+    # Stray-.gherkin guard (lead-vzxd.7 defect D): the gate globs ``*.feature``
+    # only, so a legacy ``.gherkin`` file would be invisible and let an
+    # unmigrated corpus satisfy the gate. Scan the tree for ``.gherkin`` files
+    # and surface each as an E_STRAY_GHERKIN finding, keeping the gate RED while
+    # any remain. Deterministic (sorted) order so the diagnostic is reproducible.
+    for stray in sorted(Path(corpus_dir).rglob(_STRAY_GLOB)):
+        result.add(
+            AggregateFinding(
+                code=E_STRAY_GHERKIN,
+                file=str(stray),
+                detail=(
+                    "legacy .gherkin file remains under the corpus "
+                    "(migrate it to .feature before the aggregate gate can pass)"
+                ),
+            )
+        )
+
     # Deterministic order so the diagnostic is reproducible run-to-run.
     files = sorted(Path(corpus_dir).rglob(_FEATURE_GLOB))
     for path in files:
