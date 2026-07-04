@@ -2493,3 +2493,25 @@ def then_service_accepted_not_substituting(context: dict) -> None:
     assert "E_" not in combined, (
         f"expected no violation with a known @service present; got:\n{combined}"
     )
+
+
+# -- @service does not substitute for @bc (scenario 10) -----------------
+
+
+@given(
+    "a scenario file whose Feature carries a @service tag but carries no @bc tag"
+)
+def given_feature_service_but_no_bc(context: dict, tmp_path) -> None:
+    # A Feature carrying a known @service and a valid @origin, but NO @bc tag.
+    # @service must NOT substitute for the mandatory owner, so E_MISSING_BC
+    # fires exactly as it does when neither @service nor @bc is present.
+    service = _FIXTURE_MANIFEST["services"][0]
+    text = build_feature_text(
+        feature_tags=(f"@service:{service}", "@origin:adr-056")
+    )
+    assert "@service:" in text and "@bc:" not in text, (
+        "fixture must carry @service but no @bc"
+    )
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )

@@ -93,3 +93,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is 0
     And the optional @service is accepted without substituting for the mandatory @bc owner
+
+  @scenario_hash:387d1451be7f77e7 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A @service tag does not substitute for the mandatory @bc owner tag
+    Given a scenario file whose Feature carries a @service tag but carries no @bc tag
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending feature and the rule code E_MISSING_BC
