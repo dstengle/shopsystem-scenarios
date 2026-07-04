@@ -2005,3 +2005,50 @@ def then_no_violation_diagnostic(context: dict) -> None:
         f"expected no violation diagnostic; got:\nstdout={context.get('cli_stdout')!r}\n"
         f"stderr={context.get('cli_stderr')!r}"
     )
+
+
+# -- E_GHERKIN_PARSE (scenario 2) ---------------------------------------
+
+
+_UNPARSEABLE_SINGLE_FEATURE = (
+    "@bc:shopsystem-scenarios @origin:adr-056\n"
+    "Feature: A file with exactly one Feature but a broken body\n"
+    "  Scenario: s\n"
+    "    Given a step\n"
+    '      """\n'
+    "      an unterminated doc string that off-the-shelf gherkin rejects\n"
+)
+
+
+@given(
+    "a scenario file whose text does not parse under the @cucumber/gherkin parser"
+)
+def given_unparseable_file(context: dict, tmp_path) -> None:
+    # Exactly one Feature keyword (so the file is NOT caught by the
+    # E_NO_FEATURE / E_MULTI_FEATURE cardinality pre-scan) but a body the
+    # off-the-shelf parser rejects — an unterminated doc-string. This routes
+    # the file to the genuine parser-path and thus to E_GHERKIN_PARSE.
+    assert _UNPARSEABLE_SINGLE_FEATURE.count("Feature:") == 1
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=_UNPARSEABLE_SINGLE_FEATURE)
+    )
+
+
+@then(
+    parsers.parse(
+        "the diagnostic names the offending file and the rule code {rule_code}"
+    )
+)
+def then_diagnostic_names_file_and_rule(context: dict, rule_code: str) -> None:
+    # The violation diagnostic (on stderr) must name BOTH the offending file
+    # path and the stable rule code, so a downstream reader can locate the
+    # file and key on the code. Shared across E_GHERKIN_PARSE / E_NO_FEATURE /
+    # E_MULTI_FEATURE via the {rule_code} placeholder.
+    stderr = context.get("cli_stderr", "")
+    target = context["validate_target"]
+    assert rule_code in stderr, (
+        f"expected rule code {rule_code!r} in diagnostic; got:\n{stderr}"
+    )
+    assert target in stderr, (
+        f"expected offending file {target!r} named in diagnostic; got:\n{stderr}"
+    )
