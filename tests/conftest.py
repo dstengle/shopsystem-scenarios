@@ -2301,3 +2301,16 @@ def then_diagnostic_names_bc_value_and_rule(context: dict, rule_code: str) -> No
     assert value in stderr, (
         f"expected offending @bc value {value!r} named in diagnostic; got:\n{stderr}"
     )
+
+
+# -- E_MISSING_ORIGIN (scenario 4) --------------------------------------
+
+
+@given("a scenario file whose Feature carries no @origin tag")
+def given_feature_no_origin(context: dict, tmp_path) -> None:
+    # A Feature carrying @bc but NO @origin tag; scenarios are conformant.
+    text = build_feature_text(feature_tags=("@bc:shopsystem-scenarios",))
+    assert "@origin:" not in text, "fixture must carry no @origin tag"
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
