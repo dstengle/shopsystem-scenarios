@@ -145,3 +145,83 @@ def test_validator_outline_recompute_equals_scenarios_hash_raw_block(tmp_path):
         f"hash` on the raw block ({canonical}); diagnostic was: "
         f"{mismatches[0].detail!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# DEFECT B — E_MULTI_FEATURE uses the parser Feature-node count.
+# ---------------------------------------------------------------------------
+
+
+# A SINGLE valid Feature whose DESCRIPTION prose (the free-text lines between
+# the ``Feature:`` header and the first Scenario) contains the substring
+# "Feature:". A naive ``Feature:`` line scan counts two; the gherkin-official
+# parser correctly sees ONE Feature.
+_SINGLE_FEATURE_PROSE_MENTIONS_FEATURE = (
+    "@bc:shopsystem-scenarios @origin:lead-vzxd.1\n"
+    "Feature: the block-only hash\n"
+    "  The block-only hash is defined over the scenario block alone.\n"
+    "  Feature: header line is NOT part of it.\n"
+    "\n"
+    "  @scenario_hash:PLACEHOLDER\n"
+    "  Scenario: a representative scenario\n"
+    "    Given a precondition\n"
+    "    When an action occurs\n"
+    "    Then an outcome is observed\n"
+)
+
+
+def _prose_feature_with_correct_hash() -> str:
+    raw_block = (
+        "  Scenario: a representative scenario\n"
+        "    Given a precondition\n"
+        "    When an action occurs\n"
+        "    Then an outcome is observed"
+    )
+    canonical = parse_then_block_only_hash(raw_block)
+    return _SINGLE_FEATURE_PROSE_MENTIONS_FEATURE.replace(
+        "PLACEHOLDER", canonical
+    )
+
+
+def test_description_prose_containing_feature_keyword_is_not_multi_feature(
+    tmp_path,
+):
+    # A single valid Feature whose description prose contains "Feature:" must
+    # NOT trip E_MULTI_FEATURE: cardinality is the parser's Feature-node count,
+    # not a raw line scan. Before the defect-B fix the line scan counts two
+    # "Feature:" lines and wrongly fires E_MULTI_FEATURE.
+    text = _prose_feature_with_correct_hash()
+    result = _validator(tmp_path).validate_text(text, file="prose.feature")
+    codes = {v.rule for v in result.violations}
+    assert E_MULTI_FEATURE not in codes, (
+        "a single valid Feature whose description prose contains 'Feature:' "
+        "must not trip E_MULTI_FEATURE; got violations: "
+        f"{[(v.rule, v.detail) for v in result.violations]}"
+    )
+    # With a valid @bc/@origin and a correct @scenario_hash it validates clean.
+    assert result.ok, [v.rule for v in result.violations]
+
+
+def test_genuine_two_feature_file_still_trips_multi_feature(tmp_path):
+    # The control: two REAL Feature nodes (each a header at line start) must
+    # still trip E_MULTI_FEATURE — the parser-node count is >= 2. This pins the
+    # fix honest: it distinguishes prose mentioning "Feature:" from a genuine
+    # second Feature declaration.
+    two = (
+        "@bc:shopsystem-scenarios @origin:lead-vzxd.1\n"
+        "Feature: the first feature\n"
+        "  Scenario: s1\n"
+        "    Given a precondition\n"
+        "    Then an outcome\n"
+        "\n"
+        "Feature: the second feature\n"
+        "  Scenario: s2\n"
+        "    Given another precondition\n"
+        "    Then another outcome\n"
+    )
+    result = _validator(tmp_path).validate_text(two, file="two.feature")
+    codes = {v.rule for v in result.violations}
+    assert E_MULTI_FEATURE in codes, (
+        "two genuine Feature nodes must still trip E_MULTI_FEATURE; got: "
+        f"{[(v.rule, v.detail) for v in result.violations]}"
+    )
