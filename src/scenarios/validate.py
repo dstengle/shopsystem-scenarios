@@ -301,7 +301,15 @@ class Validator:
         data: dict = {}
         path = Path(self.manifest_path)
         if path.exists():
-            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            # A malformed manifest must degrade to empty registries with a
+            # clean fallback rather than crash the run: catch both an
+            # unparseable YAML document (yaml.YAMLError) and an unreadable file
+            # (OSError). A parsed-but-non-dict top level (a bare list, a
+            # scalar) is handled by the isinstance check below.
+            try:
+                loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (yaml.YAMLError, OSError):
+                loaded = None
             if isinstance(loaded, dict):
                 data = loaded
         bcs = self._manifest_names(data.get("bcs"))

@@ -220,6 +220,17 @@ def test_garbage_manifest_degrades_gracefully(tmp_path: Path) -> None:
     assert "shopsystem-product" in legal
 
 
+def test_unparseable_yaml_manifest_degrades_gracefully(tmp_path: Path) -> None:
+    """A manifest whose YAML does not even parse (a malformed document) yields
+    empty registries with a clean fallback, never a yaml.YAMLError traceback."""
+    path = tmp_path / "bc-manifest.yaml"
+    path.write_text("garbage: [nope\n", encoding="utf-8")
+    validator = Validator(manifest_path=str(path))
+    legal = validator.legal_bcs
+    assert "shopsystem-product" in legal
+    assert validator.legal_services == frozenset()
+
+
 def test_empty_manifest_degrades_gracefully(tmp_path: Path) -> None:
     path = tmp_path / "bc-manifest.yaml"
     path.write_text("", encoding="utf-8")
@@ -238,6 +249,20 @@ def test_missing_origin_index_degrades_gracefully(tmp_path: Path) -> None:
     text = _conformant_feature("shopsystem-scenarios", "adr-056")
     result = validator.validate_text(text, file="f.feature")
     assert E_UNKNOWN_ORIGIN in [v.rule for v in result.violations], result.render()
+
+
+def test_repo_root_manifest_loads_without_crash() -> None:
+    """The checked-in repo-root bc-manifest.yaml loads through the parser and
+    yields a non-empty legal @bc set with no TypeError, regardless of whether
+    it is stored in the dict-entry or bare-string shape."""
+    repo_root = Path(__file__).resolve().parent.parent
+    manifest = repo_root / "bc-manifest.yaml"
+    assert manifest.exists(), manifest
+    validator = Validator(manifest_path=str(manifest))
+    legal = validator.legal_bcs
+    assert "shopsystem-scenarios" in legal
+    # Protocol tokens always stand for @bc.
+    assert "shopsystem-product" in legal
 
 
 def test_malformed_nonlist_origin_index_degrades_gracefully(tmp_path: Path) -> None:
