@@ -382,6 +382,17 @@ class Validator:
                     detail="Feature carries no @origin provenance tag",
                 )
             )
+        elif len(origin_values) > 1:
+            result.add(
+                Violation(
+                    rule=E_MULTI_ORIGIN,
+                    line=feature_line,
+                    detail=(
+                        f"Feature carries {len(origin_values)} @origin tags "
+                        "(expected exactly one)"
+                    ),
+                )
+            )
 
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
