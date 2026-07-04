@@ -100,3 +100,11 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending feature and the rule code E_MISSING_BC
+
+  @scenario_hash:65ab84565fd85be3 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The JSON diagnostic names the offending file, scenario, and rule for a violation
+    Given a scenario file containing exactly one schema violation
+    When I run "scenarios validate --json" against the file
+    Then the exit code is non-zero
+    And stdout is a machine-readable JSON object carrying the file, line, scenario_title, scenario_hash, bc, and origin fields
+    And that JSON object carries a violations array containing the stable rule code for the violation

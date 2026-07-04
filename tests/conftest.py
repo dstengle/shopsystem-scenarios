@@ -2515,3 +2515,135 @@ def given_feature_service_but_no_bc(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=text)
     )
+
+
+# =======================================================================
+# scenario-integrity/scenarios-validate-and-schema.feature —
+# `scenarios validate --json` machine-readable diagnostic (ADR-056, slice 1c)
+#
+# The --json flag emits, on a violation, a machine-readable JSON object to
+# STDOUT (rather than the human diagnostic on stderr). The object names the
+# offending file plus the diagnostic context — line / scenario_title /
+# scenario_hash / bc / origin — and a violations array of the stable rule
+# codes that fired. The fixture plants EXACTLY ONE schema violation and the
+# step parses stdout with json.loads, asserting the named fields are present
+# and that the violations array carries the offending rule's stable code.
+# =======================================================================
+
+
+@given("a scenario file containing exactly one schema violation")
+def given_file_with_exactly_one_violation(context: dict, tmp_path) -> None:
+    # A single scenario whose embedded @scenario_hash does NOT equal the
+    # block-only hash of its body: exactly one E_HASH_MISMATCH violation. This
+    # rule is deliberately chosen because a single mismatch violation populates
+    # the richest diagnostic context in one shot — scenario_title, line, and
+    # the (embedded) scenario_hash — while the conformant feature-level @bc /
+    # @origin supply the bc / origin fields. So every field the JSON object is
+    # required to carry is honestly populated by one real violation.
+    block = ScenarioBlock(
+        "A scenario whose embedded hash is wrong",
+        ["Given a precondition", "When an action occurs", "Then an outcome"],
+        hash_tag="0000000000000000",  # deliberately not the real block-only hash
+    )
+    text = build_feature_text(
+        feature_tags=("@bc:shopsystem-scenarios", "@origin:adr-056"),
+        scenarios=[block],
+    )
+    # Fixture invariant: exactly one scenario, so exactly one hash violation.
+    assert text.count("Scenario:") == 1, "fixture must carry exactly one scenario"
+    context["validate_target"] = str(write_feature_file(tmp_path, raw_text=text))
+    context["offending_rule_code"] = "E_HASH_MISMATCH"
+
+
+@when(parsers.parse('I run "scenarios validate --json" against the file'))
+def when_run_validate_json(context: dict, tmp_path) -> None:
+    # Route through the same fixtured manifest / origin-root path the other
+    # validate scenarios use, adding --json so the diagnostic lands on stdout
+    # as a machine-readable object.
+    manifest = context.get("fixture_manifest") or _write_fixture_manifest(tmp_path)
+    origin_root = context.get("fixture_origin_root") or _write_fixture_origin_root(
+        tmp_path
+    )
+    result = subprocess.run(
+        [
+            "scenarios",
+            "validate",
+            context["validate_target"],
+            "--manifest",
+            str(manifest),
+            "--origin-root",
+            str(origin_root),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    context.update(
+        {
+            "cli_returncode": result.returncode,
+            "cli_stdout": result.stdout,
+            "cli_stderr": result.stderr,
+        }
+    )
+
+
+@then(
+    "stdout is a machine-readable JSON object carrying the file, line, "
+    "scenario_title, scenario_hash, bc, and origin fields"
+)
+def then_stdout_is_json_with_named_fields(context: dict) -> None:
+    import json as _json
+
+    stdout = context["cli_stdout"]
+    try:
+        obj = _json.loads(stdout)
+    except _json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"expected stdout to be a machine-readable JSON object; "
+            f"json.loads failed ({exc}); stdout was:\n{stdout!r}"
+        )
+    assert isinstance(obj, dict), (
+        f"expected a JSON object (dict) on stdout; got {type(obj).__name__}: {obj!r}"
+    )
+    for field_name in ("file", "line", "scenario_title", "scenario_hash", "bc", "origin"):
+        assert field_name in obj, (
+            f"expected the JSON object to carry the {field_name!r} field; "
+            f"object was:\n{obj!r}"
+        )
+    # The offending file must be named (not a null placeholder), and the
+    # scenario-level context the single violation populates must be present.
+    assert obj["file"] == context["validate_target"], (
+        f"expected the JSON object to name the offending file "
+        f"{context['validate_target']!r}; got {obj['file']!r}"
+    )
+    assert obj["scenario_title"], (
+        f"expected the JSON object to name the offending scenario; "
+        f"got scenario_title={obj['scenario_title']!r}"
+    )
+    assert obj["bc"] == "shopsystem-scenarios", (
+        f"expected the JSON object to name the owning @bc; got {obj['bc']!r}"
+    )
+    assert obj["origin"] == "adr-056", (
+        f"expected the JSON object to name the @origin provenance; "
+        f"got {obj['origin']!r}"
+    )
+    # Stash the parsed object so the violations-array Then reuses it.
+    context["json_diagnostic"] = obj
+
+
+@then(
+    "that JSON object carries a violations array containing the stable rule "
+    "code for the violation"
+)
+def then_json_violations_array_carries_rule_code(context: dict) -> None:
+    obj = context["json_diagnostic"]
+    violations = obj.get("violations")
+    assert isinstance(violations, list), (
+        f"expected a 'violations' array in the JSON object; "
+        f"got {type(violations).__name__}: {violations!r}"
+    )
+    rule_code = context["offending_rule_code"]
+    assert rule_code in violations, (
+        f"expected the violations array to carry the stable rule code "
+        f"{rule_code!r}; got {violations!r}"
+    )
