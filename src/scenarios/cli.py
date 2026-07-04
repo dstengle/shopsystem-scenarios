@@ -39,6 +39,12 @@ Subcommands:
         them to JOURNAL-FILE in the journal format (one block-only canonical
         hash per line). Idempotent: re-running over the same tree leaves an
         identical entry set hash-for-hash.
+    validate FILE [--manifest PATH] [--origin-root DIR ...]
+        Validates a scenario (.feature) FILE against the ADR-056 schema.
+        Collects a list of violations; exits 0 iff none, non-zero otherwise
+        (each violation printed to stderr naming the file and its stable rule
+        code). --manifest / --origin-root inject the @bc/@origin resolution
+        roots (defaulting to conventional repo locations).
 """
 from __future__ import annotations
 
@@ -52,6 +58,7 @@ from scenarios.journal import (
     is_recorded,
     write_journal_entries,
 )
+from scenarios.validate import Validator
 
 
 def _read_scenario_stdin(command: str) -> str | None:
@@ -164,6 +171,23 @@ def _cmd_journal_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validate(args: argparse.Namespace) -> int:
+    # Validate one scenario file against the ADR-056 schema. Resolution roots
+    # (--manifest / --origin-root) are injectable so slice 1b's @bc/@origin
+    # legal-set lookups plug in without a CLI refactor; this foundation slice
+    # accepts them but does not yet resolve against them. A run collects a list
+    # of violations; exit code is 0 iff empty, non-zero (each violation printed
+    # to stderr, naming the file and rule code) otherwise.
+    validator = Validator(
+        manifest_path=args.manifest,
+        origin_roots=args.origin_root or None,
+    )
+    result = validator.validate_file(args.file)
+    if not result.ok:
+        print(result.render(), file=sys.stderr)
+    return result.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="scenarios")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -268,6 +292,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to the journal file to write (one block-only hash per line)",
     )
     journal_rebuild_cmd.set_defaults(func=_cmd_journal_rebuild)
+
+    validate_cmd = sub.add_parser(
+        "validate",
+        help="validate a scenario file against the ADR-056 schema",
+    )
+    validate_cmd.add_argument(
+        "file",
+        help="path to the scenario (.feature) file to validate",
+    )
+    validate_cmd.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "path to the bc-manifest.yaml the @bc/@service legal set resolves "
+            "against (defaults to the conventional repo location; injectable "
+            "so tests can supply a fixture)"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--origin-root",
+        action="append",
+        default=None,
+        help=(
+            "directory the @origin legal set resolves against (repeatable; "
+            "defaults to adr/ pdr/ briefs/; injectable so tests can supply "
+            "fixtures)"
+        ),
+    )
+    validate_cmd.set_defaults(func=_cmd_validate)
 
     return parser
 
