@@ -97,6 +97,15 @@ _LEAD_BEAD_PREFIXES = ("lead-", "shopsystem-")
 _LEAD_BEAD_SUFFIX_RE = re.compile(r"^[a-z0-9]+(\.[0-9]+)*$", re.IGNORECASE)
 
 
+# The feature-level tag that marks a whole file as BC-INTERNAL and thus EXEMPT
+# from the ADR-056 three-dimension schema gate (lead-vzxd.3 RULING). A file
+# whose Feature carries this tag is a guard for the BC's own infra (the
+# editable-install/stale-wheel guard, the release-workflow CI guard, etc.), not
+# a lead-pinned product scenario: its @bc/@origin/@scenario_hash checks are
+# WAIVED and the --aggregate gate SKIPS it entirely. The file must still be
+# valid Gherkin (E_GHERKIN_PARSE / cardinality still apply). Ships in v0.3.1.
+BC_INTERNAL_TAG = "@bc_internal"
+
 # A Feature keyword at the start of a (stripped) line. Mirrors the line-start
 # discipline feature.py uses for Scenario:/tags — a "Feature:" appearing
 # mid-step as substring is not a Feature declaration.
@@ -471,12 +480,35 @@ class Validator:
             result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
             return result
 
+        # A feature-level @bc_internal tag marks the whole file as BC-INTERNAL
+        # and EXEMPT from the ADR-056 three-dimension schema gate (lead-vzxd.3
+        # RULING). The file has already cleared the gherkin-validity bar above
+        # (cardinality + parse); the @bc/@origin/@scenario_hash/@service checks
+        # are WAIVED for it, so it yields zero violations regardless of whether
+        # it carries those tags. Detection is at the parsed-feature level so a
+        # "@bc_internal" appearing as a substring in a step body is not
+        # mistaken for the exemption tag.
+        if self._feature_is_bc_internal(document):
+            return result
+
         # Exactly one Feature and the file parses. Now the tag-dimension rules
         # (slice 1b) run on the parsed GherkinDocument, ACCRETING every
         # violation they find (they do not early-return) so a file with several
         # independent defects reports them all in one run.
         self._check_tags(document, result)
         return result
+
+    def _feature_is_bc_internal(self, document: dict) -> bool:
+        """True iff the parsed document's Feature carries the @bc_internal tag.
+
+        The exemption is decided on the PARSED feature-level tag list, so it is
+        exact (a bare ``@bc_internal`` feature tag, not a substring match
+        against raw text). A document with no feature is not exempt.
+        """
+        feature = document.get("feature")
+        if feature is None:
+            return False
+        return BC_INTERNAL_TAG in self._tag_names(feature)
 
     # -- tag-dimension rules (slice 1b) -------------------------------------
 
@@ -719,6 +751,36 @@ class AggregateResult:
 _FEATURE_GLOB = "*.feature"
 
 
+def _corpus_file_is_bc_internal(path: Path) -> bool:
+    """True iff the feature file at ``path`` carries the @bc_internal exemption.
+
+    Parses the file with off-the-shelf gherkin and checks the parsed
+    feature-level tag list — the same exact tag test the per-file Validator
+    uses. A file that cannot be read or does not parse returns False: it is NOT
+    treated as exempt, so it falls through to the per-file Validator in the
+    aggregate loop and surfaces its E_GHERKIN_PARSE (or cardinality) finding
+    rather than being silently skipped. This keeps the exemption a property of
+    a VALID @bc_internal feature, never a way to hide a broken file.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # A file with anything other than exactly one Feature is left to the
+    # per-file Validator (it surfaces E_NO_FEATURE / E_MULTI_FEATURE); only a
+    # single-Feature file is a candidate for the exemption.
+    if Validator._count_feature_lines(text) != 1:
+        return False
+    try:
+        document = Parser().parse(TokenScanner(text))
+    except (CompositeParserException, ParserException):
+        return False
+    feature = document.get("feature")
+    if feature is None:
+        return False
+    return BC_INTERNAL_TAG in Validator._tag_names(feature)
+
+
 def validate_corpus(
     corpus_dir: str,
     *,
@@ -747,6 +809,18 @@ def validate_corpus(
             origin_roots=list(origin_roots) if origin_roots is not None else None,
             origin_index=origin_index,
         )
+
+        # A @bc_internal file is BC-INTERNAL and EXEMPT (lead-vzxd.3 RULING):
+        # the aggregate gate SKIPS it entirely — it contributes no per-file
+        # violation and no transitional marker, whether or not it carries
+        # @bc/@origin/@scenario_hash. Detect the exemption on the parsed
+        # feature-level tag list; a file that does not parse is NOT skipped
+        # here (it falls through to validate_file below and surfaces its
+        # E_GHERKIN_PARSE finding, so a broken exempt-looking file is not
+        # silently swallowed).
+        if _corpus_file_is_bc_internal(path):
+            continue
+
         file_result = validator.validate_file(file_str)
 
         # Per-file schema violations keep the gate RED and are surfaced with
