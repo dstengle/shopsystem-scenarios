@@ -108,3 +108,33 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     Then the exit code is non-zero
     And stdout is a machine-readable JSON object carrying the file, line, scenario_title, scenario_hash, bc, and origin fields
     And that JSON object carries a violations array containing the stable rule code for the violation
+
+  @scenario_hash:6f328acceacee7e0 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The aggregate gate fails when any scenario in the corpus is @bc:unassigned
+    Given a corpus of scenario files that are each individually schema-valid
+    And at least one Feature in the corpus carries @bc:unassigned
+    When I run "scenarios validate --aggregate" over the corpus
+    Then the exit code is non-zero
+    And a diagnostic surfaces the W_BC_UNASSIGNED marker naming the offending feature
+
+  @scenario_hash:14b16ef27d542d81 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The aggregate gate fails when any scenario in the corpus is @origin:unresolved
+    Given a corpus of scenario files that are each individually schema-valid
+    And at least one Feature in the corpus carries @origin:unresolved
+    When I run "scenarios validate --aggregate" over the corpus
+    Then the exit code is non-zero
+    And a diagnostic surfaces the W_ORIGIN_UNRESOLVED marker naming the offending feature
+
+  @scenario_hash:1a2078ddfc50a33f @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The aggregate gate fails when any file in the corpus is non-conformant
+    Given a corpus in which exactly one file violates the per-file schema
+    When I run "scenarios validate --aggregate" over the corpus
+    Then the exit code is non-zero
+    And the diagnostic names the non-conformant file and the per-file rule code it violated
+
+  @scenario_hash:addd899ec87ec171 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The aggregate gate passes only when every file is conformant and no transitional markers remain
+    Given a corpus in which every file is schema-valid and no Feature carries @bc:unassigned or @origin:unresolved
+    When I run "scenarios validate --aggregate" over the corpus
+    Then the exit code is 0
+    And no violation diagnostic is emitted

@@ -2647,3 +2647,251 @@ def then_json_violations_array_carries_rule_code(context: dict) -> None:
         f"expected the violations array to carry the stable rule code "
         f"{rule_code!r}; got {violations!r}"
     )
+
+
+# =======================================================================
+# scenario-integrity/scenarios-validate-and-schema.feature —
+# `scenarios validate --aggregate` corpus system-consistency gate
+# (ADR-056 D8, slice 2)
+#
+# The aggregate gate runs the per-file Validator over a CORPUS (a directory
+# of scenario files) and additionally scans for two TRANSITIONAL forcing
+# markers that are LEGAL per-file placeholder values but must reach zero
+# before the system is consistent:
+#
+#   - @bc:unassigned      -> aggregate marker W_BC_UNASSIGNED
+#   - @origin:unresolved  -> aggregate marker W_ORIGIN_UNRESOLVED
+#
+# The gate exits NON-ZERO while ANY file is non-conformant (a per-file schema
+# violation) OR ANY transitional marker remains, and exits 0 ONLY when every
+# file is schema-valid AND zero transitional markers remain. These markers are
+# aggregate-level WARNING/marker codes distinct from the per-file E_ codes:
+# @bc:unassigned / @origin:unresolved do NOT trip E_UNKNOWN_BC / E_UNKNOWN_ORIGIN
+# at the per-file level (they are valid placeholders), but they DO keep the
+# aggregate gate RED.
+#
+# Each scenario builds its OWN corpus under tmp_path and supplies the fixture
+# manifest + origin root (reused from slice 1b) so the conformant files'
+# @bc/@origin values resolve, then runs validate with --aggregate pointed at
+# the corpus directory (NEVER the repo's real features/ dir).
+# =======================================================================
+
+
+def _run_aggregate_with_fixtures(context: dict, corpus_dir, tmp_path) -> None:
+    # Run `scenarios validate --aggregate <corpus-dir>` with a fixture manifest
+    # + origin root so the conformant corpus files' @bc/@origin values resolve
+    # against test-pinned legal sets, not the repo-root file.
+    manifest = context.get("fixture_manifest") or _write_fixture_manifest(tmp_path)
+    origin_root = context.get("fixture_origin_root") or _write_fixture_origin_root(
+        tmp_path
+    )
+    result = subprocess.run(
+        [
+            "scenarios",
+            "validate",
+            "--aggregate",
+            str(corpus_dir),
+            "--manifest",
+            str(manifest),
+            "--origin-root",
+            str(origin_root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    context.update(
+        {
+            "cli_returncode": result.returncode,
+            "cli_stdout": result.stdout,
+            "cli_stderr": result.stderr,
+        }
+    )
+
+
+def _make_corpus_dir(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    return corpus
+
+
+@when(parsers.parse('I run "scenarios validate --aggregate" over the corpus'))
+def when_run_validate_aggregate(context: dict, tmp_path) -> None:
+    # Single when-step for every aggregate scenario. Runs the subcommand with
+    # --aggregate against the corpus directory the Given built, plus the fixture
+    # manifest / origin root so conformant files resolve.
+    _run_aggregate_with_fixtures(context, context["corpus_dir"], tmp_path)
+
+
+# -- W_BC_UNASSIGNED (scenario 1) ---------------------------------------
+
+
+@given("a corpus of scenario files that are each individually schema-valid")
+def given_corpus_each_schema_valid(context: dict, tmp_path) -> None:
+    # Two individually schema-valid files: exactly one Feature each, carrying a
+    # known @bc, a resolving @origin, and an auto-hashed scenario. Neither
+    # carries a transitional marker YET — the marker Given below plants one.
+    corpus = _make_corpus_dir(tmp_path)
+    for i in range(2):
+        text = build_feature_text(
+            feature_name=f"conformant corpus feature {i}",
+            feature_tags=("@bc:shopsystem-scenarios", "@origin:adr-056"),
+            scenarios=[default_scenario(f"conformant scenario {i}")],
+        )
+        (corpus / f"conformant_{i}.feature").write_text(text, encoding="utf-8")
+    context["corpus_dir"] = corpus
+
+
+@given("at least one Feature in the corpus carries @bc:unassigned")
+def given_corpus_has_bc_unassigned(context: dict) -> None:
+    # Add a file whose Feature carries @bc:unassigned — a LEGAL per-file
+    # placeholder (it does NOT trip E_UNKNOWN_BC) but a transitional marker the
+    # aggregate gate must surface as W_BC_UNASSIGNED. The file is otherwise
+    # schema-valid (resolving @origin, auto-hashed scenario) so the ONLY thing
+    # keeping the gate RED is the transitional marker, not a per-file defect.
+    corpus = context["corpus_dir"]
+    text = build_feature_text(
+        feature_name="an unassigned-bc feature awaiting an owner",
+        feature_tags=("@bc:unassigned", "@origin:adr-056"),
+        scenarios=[default_scenario("a scenario whose bc is not yet assigned")],
+    )
+    offending = corpus / "unassigned_bc.feature"
+    offending.write_text(text, encoding="utf-8")
+    context["offending_feature_file"] = str(offending)
+
+
+@then(
+    "a diagnostic surfaces the W_BC_UNASSIGNED marker naming the offending "
+    "feature"
+)
+def then_diagnostic_surfaces_bc_unassigned(context: dict) -> None:
+    combined = context.get("cli_stdout", "") + context.get("cli_stderr", "")
+    assert "W_BC_UNASSIGNED" in combined, (
+        f"expected the aggregate diagnostic to surface the W_BC_UNASSIGNED "
+        f"marker; got:\nstdout={context.get('cli_stdout')!r}\n"
+        f"stderr={context.get('cli_stderr')!r}"
+    )
+    offending = context["offending_feature_file"]
+    assert offending in combined, (
+        f"expected the diagnostic to name the offending feature file "
+        f"{offending!r}; got:\n{combined}"
+    )
+
+
+# -- W_ORIGIN_UNRESOLVED (scenario 2) -----------------------------------
+
+
+@given("at least one Feature in the corpus carries @origin:unresolved")
+def given_corpus_has_origin_unresolved(context: dict) -> None:
+    # Add a file whose Feature carries @origin:unresolved — a LEGAL per-file
+    # placeholder (it does NOT trip E_UNKNOWN_ORIGIN) but a transitional marker
+    # the aggregate gate must surface as W_ORIGIN_UNRESOLVED. Otherwise
+    # schema-valid (known @bc, auto-hashed scenario), so the marker is the sole
+    # reason the gate stays RED.
+    corpus = context["corpus_dir"]
+    text = build_feature_text(
+        feature_name="an unresolved-origin feature awaiting provenance",
+        feature_tags=("@bc:shopsystem-scenarios", "@origin:unresolved"),
+        scenarios=[default_scenario("a scenario whose origin is not yet resolved")],
+    )
+    offending = corpus / "unresolved_origin.feature"
+    offending.write_text(text, encoding="utf-8")
+    context["offending_feature_file"] = str(offending)
+
+
+@then(
+    "a diagnostic surfaces the W_ORIGIN_UNRESOLVED marker naming the offending "
+    "feature"
+)
+def then_diagnostic_surfaces_origin_unresolved(context: dict) -> None:
+    combined = context.get("cli_stdout", "") + context.get("cli_stderr", "")
+    assert "W_ORIGIN_UNRESOLVED" in combined, (
+        f"expected the aggregate diagnostic to surface the W_ORIGIN_UNRESOLVED "
+        f"marker; got:\nstdout={context.get('cli_stdout')!r}\n"
+        f"stderr={context.get('cli_stderr')!r}"
+    )
+    offending = context["offending_feature_file"]
+    assert offending in combined, (
+        f"expected the diagnostic to name the offending feature file "
+        f"{offending!r}; got:\n{combined}"
+    )
+
+
+# -- non-conformant corpus file (scenario 3) ----------------------------
+
+
+@given("a corpus in which exactly one file violates the per-file schema")
+def given_corpus_one_nonconformant(context: dict, tmp_path) -> None:
+    # A corpus of two files: one fully conformant, one carrying a genuine
+    # per-file schema violation (a scenario whose embedded @scenario_hash does
+    # NOT equal its block-only hash -> E_HASH_MISMATCH). NO transitional marker
+    # is present, so the aggregate gate stays RED solely because of the per-file
+    # violation, and the diagnostic must name that file and the per-file code.
+    corpus = _make_corpus_dir(tmp_path)
+    conformant = build_feature_text(
+        feature_name="a conformant sibling",
+        feature_tags=("@bc:shopsystem-scenarios", "@origin:adr-056"),
+        scenarios=[default_scenario("a conformant scenario")],
+    )
+    (corpus / "conformant.feature").write_text(conformant, encoding="utf-8")
+
+    bad_block = ScenarioBlock(
+        "a scenario whose embedded hash is wrong",
+        ["Given a precondition", "When an action occurs", "Then an outcome"],
+        hash_tag="0000000000000000",  # deliberately not the real block-only hash
+    )
+    bad = build_feature_text(
+        feature_name="a non-conformant file",
+        feature_tags=("@bc:shopsystem-scenarios", "@origin:adr-056"),
+        scenarios=[bad_block],
+    )
+    offending = corpus / "nonconformant.feature"
+    offending.write_text(bad, encoding="utf-8")
+    context["corpus_dir"] = corpus
+    context["offending_feature_file"] = str(offending)
+    context["offending_rule_code"] = "E_HASH_MISMATCH"
+
+
+@then(
+    "the diagnostic names the non-conformant file and the per-file rule code "
+    "it violated"
+)
+def then_diagnostic_names_nonconformant_file_and_code(context: dict) -> None:
+    combined = context.get("cli_stdout", "") + context.get("cli_stderr", "")
+    offending = context["offending_feature_file"]
+    rule_code = context["offending_rule_code"]
+    assert offending in combined, (
+        f"expected the aggregate diagnostic to name the non-conformant file "
+        f"{offending!r}; got:\n{combined}"
+    )
+    assert rule_code in combined, (
+        f"expected the aggregate diagnostic to name the per-file rule code "
+        f"{rule_code!r}; got:\n{combined}"
+    )
+
+
+# -- clean corpus passes (scenario 4) -----------------------------------
+
+
+@given(
+    "a corpus in which every file is schema-valid and no Feature carries "
+    "@bc:unassigned or @origin:unresolved"
+)
+def given_corpus_fully_clean(context: dict, tmp_path) -> None:
+    # A corpus of three individually schema-valid files, NONE carrying a
+    # transitional marker. This is the only shape that lets the aggregate gate
+    # exit 0: every file conformant AND zero transitional markers. Guard the
+    # fixture invariant so a drift toward a marker-bearing file can't make this
+    # scenario pass vacuously.
+    corpus = _make_corpus_dir(tmp_path)
+    for i in range(3):
+        text = build_feature_text(
+            feature_name=f"clean corpus feature {i}",
+            feature_tags=("@bc:shopsystem-scenarios", "@origin:adr-056"),
+            scenarios=[default_scenario(f"clean scenario {i}")],
+        )
+        assert "@bc:unassigned" not in text, "fixture must carry no @bc:unassigned"
+        assert "@origin:unresolved" not in text, (
+            "fixture must carry no @origin:unresolved"
+        )
+        (corpus / f"clean_{i}.feature").write_text(text, encoding="utf-8")
+    context["corpus_dir"] = corpus
