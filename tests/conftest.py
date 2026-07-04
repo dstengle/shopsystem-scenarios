@@ -3005,3 +3005,154 @@ def given_corpus_fully_clean(context: dict, tmp_path) -> None:
         )
         (corpus / f"clean_{i}.feature").write_text(text, encoding="utf-8")
     context["corpus_dir"] = corpus
+
+
+# =======================================================================
+# scenarios-validate-and-schema.feature (slice 4) — the conformant
+# create/consolidate helpers (ADR-056 D12).
+#
+# `scenarios create` emits a Feature-headed grouped Gherkin file from one
+# or more scenario BODIES plus a target @bc owner and @origin: exactly one
+# `Feature:` carrying the feature-level @bc/@origin, and each scenario
+# tagged with @scenario_hash:<H> where H is its parser-path block-only
+# hash. The output must pass `scenarios validate` — proven by running the
+# real CLI against the emitted file WITH a fixture manifest / origin root
+# that make the chosen @bc/@origin legal (validate is NOT weakened; the
+# fixtures make the conformant output genuinely resolve).
+# =======================================================================
+
+
+_CREATE_BODY_A = (
+    "Scenario: a first created scenario\n"
+    "    Given a precondition of the first behavior\n"
+    "    When the first action occurs\n"
+    "    Then the first outcome is observed"
+)
+_CREATE_BODY_B = (
+    "Scenario: a second created scenario\n"
+    "    Given a precondition of the second behavior\n"
+    "    When the second action occurs\n"
+    "    Then the second outcome is observed"
+)
+
+
+@given(
+    "one or more scenario bodies together with a target @bc owner and a "
+    "target @origin"
+)
+def given_scenario_bodies_bc_origin(context: dict, tmp_path) -> None:
+    # Two bare scenario bodies (Scenario: keyword + steps, no tags), plus a
+    # target @bc owner that is a known context under the fixture manifest and
+    # a target @origin that resolves under the fixture origin root. The
+    # create helper will wrap them into one Feature-headed file.
+    context["create_bodies"] = [_CREATE_BODY_A, _CREATE_BODY_B]
+    context["create_bc"] = "shopsystem-scenarios"
+    context["create_origin"] = "adr-056"
+    context["create_feature_name"] = "a created grouped feature"
+    # Fixtures that make the chosen @bc/@origin legal, so the emitted file
+    # genuinely validates green (validate itself is unchanged).
+    context["fixture_manifest"] = _write_fixture_manifest(tmp_path)
+    context["fixture_origin_root"] = _write_fixture_origin_root(tmp_path)
+    context["create_out_path"] = tmp_path / "created.feature"
+
+
+@when("I run the scenarios create helper to emit a grouped file")
+def when_run_create_helper(context: dict) -> None:
+    from scenarios.create import create_feature_text
+
+    text = create_feature_text(
+        feature_name=context["create_feature_name"],
+        bc=context["create_bc"],
+        origin=context["create_origin"],
+        scenario_bodies=context["create_bodies"],
+    )
+    context["create_out_path"].write_text(text, encoding="utf-8")
+    context["create_text"] = text
+
+
+@then(
+    "the emitted file declares exactly one Feature carrying the given @bc "
+    "and @origin"
+)
+def then_emitted_one_feature_with_bc_origin(context: dict) -> None:
+    text = context["create_text"]
+    feature_lines = [
+        line for line in text.splitlines() if line.strip().startswith("Feature:")
+    ]
+    assert len(feature_lines) == 1, (
+        f"expected exactly one Feature: line; got {len(feature_lines)}:\n{text}"
+    )
+    assert f"@bc:{context['create_bc']}" in text, (
+        f"expected feature-level @bc:{context['create_bc']} in:\n{text}"
+    )
+    assert f"@origin:{context['create_origin']}" in text, (
+        f"expected feature-level @origin:{context['create_origin']} in:\n{text}"
+    )
+
+
+@then(
+    "every scenario in the emitted file carries exactly one @scenario_hash "
+    "equal to its parser-path block-only hash"
+)
+def then_every_scenario_hash_is_parser_path(context: dict) -> None:
+    import re
+
+    from scenarios.outstanding import (
+        _iter_scenario_blocks,
+        compute_block_only_hash,
+    )
+
+    text = context["create_text"]
+    blocks = list(_iter_scenario_blocks(text))
+    assert len(blocks) == len(context["create_bodies"]), (
+        f"expected {len(context['create_bodies'])} scenario blocks; "
+        f"got {len(blocks)}:\n{text}"
+    )
+    # Walk the file: each Scenario: line must be immediately preceded
+    # (allowing blank lines) by a tag line carrying exactly one
+    # @scenario_hash tag whose value is the block-only hash of that block.
+    lines = text.splitlines()
+    scenario_idx = [
+        i for i, ln in enumerate(lines) if ln.strip().startswith("Scenario:")
+    ]
+    for pos, block in zip(scenario_idx, blocks):
+        expected = compute_block_only_hash(block)
+        j = pos - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        assert j >= 0, f"scenario at line {pos} has no preceding tag line:\n{text}"
+        tag_line = lines[j].strip()
+        hashes = re.findall(r"@scenario_hash:([0-9a-f]{16})", tag_line)
+        assert len(hashes) == 1, (
+            f"expected exactly one @scenario_hash tag preceding scenario at "
+            f"line {pos}; got {hashes!r} on tag line {tag_line!r}"
+        )
+        assert hashes[0] == expected, (
+            f"scenario @scenario_hash {hashes[0]!r} != parser-path block-only "
+            f"hash {expected!r} for block:\n{block}"
+        )
+
+
+@then(parsers.parse('running "scenarios validate" against the emitted file exits 0'))
+def then_validate_emitted_exits_zero(context: dict) -> None:
+    # Run the REAL validate CLI against the emitted file, supplying the
+    # fixture manifest / origin root so the chosen @bc/@origin resolve. A
+    # genuinely-conformant emitted file exits 0; validate is unchanged.
+    result = subprocess.run(
+        [
+            "scenarios",
+            "validate",
+            str(context["create_out_path"]),
+            "--manifest",
+            str(context["fixture_manifest"]),
+            "--origin-root",
+            str(context["fixture_origin_root"]),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"expected the emitted file to pass `scenarios validate` (exit 0); "
+        f"got {result.returncode}\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )

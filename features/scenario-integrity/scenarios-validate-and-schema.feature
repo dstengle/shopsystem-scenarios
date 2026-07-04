@@ -145,3 +145,18 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I pipe to "scenarios hash" the scenario body alone and separately the same body wrapped with preceding @-tags, comment lines, and a Feature declaration
     Then both invocations emit the identical 16-hex hash H
     And H is insensitive to the surrounding tags, comment lines, and Feature line
+
+  @scenario_hash:7222c8e840f7a0e0 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The create helper emits a Feature-headed file that passes "scenarios validate"
+    Given one or more scenario bodies together with a target @bc owner and a target @origin
+    When I run the scenarios create helper to emit a grouped file
+    Then the emitted file declares exactly one Feature carrying the given @bc and @origin
+    And every scenario in the emitted file carries exactly one @scenario_hash equal to its parser-path block-only hash
+    And running "scenarios validate" against the emitted file exits 0
+
+  @scenario_hash:58765299713ed201 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: Consolidating bare per-scenario files into one Feature file preserves every @scenario_hash
+    Given two bare single-scenario files, each with a known parser-path block-only hash
+    When I run the scenarios consolidate helper to merge them into one Feature-headed file with inherited @bc and @origin
+    Then the resulting file groups both scenarios under exactly one Feature
+    And each scenario's @scenario_hash in the consolidated file equals that scenario's hash before consolidation
