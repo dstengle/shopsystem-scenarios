@@ -39,7 +39,7 @@ Subcommands:
         them to JOURNAL-FILE in the journal format (one block-only canonical
         hash per line). Idempotent: re-running over the same tree leaves an
         identical entry set hash-for-hash.
-    validate FILE [--manifest PATH] [--origin-root DIR ...] [--json]
+    validate FILE [--manifest PATH] [--origin-root DIR ...] [--origin-index FILE] [--json]
         Validates a scenario (.feature) FILE against the ADR-056 schema.
         Collects a list of violations; exits 0 iff none, non-zero otherwise
         (each violation printed to stderr naming the file and its stable rule
@@ -205,6 +205,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     validator = Validator(
         manifest_path=args.manifest,
         origin_roots=args.origin_root or None,
+        origin_index=args.origin_index,
     )
     result = validator.validate_file(args.file)
     if not result.ok:
@@ -229,6 +230,7 @@ def _cmd_validate_aggregate(args: argparse.Namespace) -> int:
         args.file,
         manifest_path=args.manifest,
         origin_roots=args.origin_root or None,
+        origin_index=args.origin_index,
     )
     if not result.ok:
         print(result.render(), file=sys.stderr)
@@ -401,6 +403,18 @@ def build_parser() -> argparse.ArgumentParser:
             "directory the @origin legal set resolves against (repeatable; "
             "defaults to adr/ pdr/ briefs/; injectable so tests can supply "
             "fixtures)"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--origin-index",
+        default=None,
+        help=(
+            "path to a generated origin-index identifier list (one id per line, "
+            "e.g. adr-056 / pdr-003 / brief-foo) the @origin legal set resolves "
+            "against by MEMBERSHIP. Real ADR files are NNN-slug.md and a BC "
+            "container carries no adr/ dir (ADR-018), so this is the real-data "
+            "resolution path; --origin-root dir-scan is retained as a fixture "
+            "fallback. A missing/empty index degrades gracefully"
         ),
     )
     validate_cmd.add_argument(
