@@ -417,6 +417,42 @@ class Validator:
                     )
                 )
 
+        # -- @scenario_hash: per-scenario, present -------------------------
+        for child in feature.get("children", []):
+            scenario = child.get("scenario")
+            if scenario is None:
+                continue
+            self._check_scenario_hash(scenario, result)
+
+    @staticmethod
+    def _reconstruct_block(scenario: dict) -> str:
+        """The block-only body of a parsed scenario: ``Scenario: <name>`` plus
+        one ``<keyword> <text>`` line per step. This is the parser-path input
+        to ``compute_scenario_hash`` — the same canonical form the block-only
+        hash is defined over."""
+        lines = [f"Scenario: {scenario['name']}"]
+        for step in scenario.get("steps", []):
+            lines.append(f"{step['keyword'].strip()} {step['text']}")
+        return "\n".join(lines)
+
+    def _check_scenario_hash(self, scenario: dict, result: ValidationResult) -> None:
+        scenario_tags = self._tag_names(scenario)
+        title = scenario.get("name")
+        line = scenario.get("location", {}).get("line")
+        hash_values = self._values_for(scenario_tags, "scenario_hash")
+        if len(hash_values) == 0:
+            result.add(
+                Violation(
+                    rule=E_MISSING_HASH,
+                    line=line,
+                    scenario_title=title,
+                    detail=(
+                        f"scenario {title!r} carries no @scenario_hash tag"
+                    ),
+                )
+            )
+            return
+
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
         return self.validate_text(text, file=path)
