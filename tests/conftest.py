@@ -12,8 +12,10 @@ tmp_path fixtures, with the `context` dict carrying cross-step state.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -156,6 +158,114 @@ def then_stdout_is_16_lowercase_hex(context: dict) -> None:
 def then_stderr_is_empty(context: dict) -> None:
     stderr = context["cli_stderr"]
     assert stderr == "", f"expected empty stderr; got {stderr!r}"
+
+
+# =======================================================================
+# scenarios-validate-and-schema.feature — raw-stdin `scenarios hash`
+# parser-path equivalence (ADR-056 D5 / scenario 66e694afa456dbf1).
+#
+# The raw-stdin `scenarios hash` of a scenario body alone, and of the SAME
+# body wrapped with preceding @-tags, comment lines, and a `Feature:` line,
+# must both emit the identical 16-hex block-only hash H — the parser-path
+# (`list`/`count`) block-only hash of the body. The CLI is invoked as
+# `python -m scenarios` under PYTHONPATH=src so the run pins to THIS
+# worktree's reconciled source rather than a stale editable-install console
+# script that shadows it (bead cdi; mirrors test_hash.py's _CLI).
+# =======================================================================
+
+
+_PARSER_PATH_HASH_BODY = (
+    'Scenario: The raw-stdin "scenarios hash" of a scenario equals its '
+    "parser-path block-only hash\n"
+    "    Given a scenario whose canonical block-only hash under the parser "
+    "path is H\n"
+    '    When I pipe to "scenarios hash" the scenario body alone and '
+    "separately the same body wrapped with preceding @-tags, comment lines, "
+    "and a Feature declaration\n"
+    "    Then both invocations emit the identical 16-hex hash H\n"
+    "    And H is insensitive to the surrounding tags, comment lines, and "
+    "Feature line"
+)
+
+
+def _run_scenarios_hash_in_worktree(stdin_text: str) -> str:
+    # Pin to this worktree's source via `python -m scenarios` under
+    # PYTHONPATH=src (bead cdi): the bare `scenarios` console script is a
+    # cross-worktree editable install that would not carry this slice's
+    # reconcile.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "scenarios", "hash"],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+    assert result.stderr == "", f"expected empty stderr; got {result.stderr!r}"
+    return result.stdout.strip()
+
+
+@given(parsers.parse(
+    "a scenario whose canonical block-only hash under the parser path is H"
+))
+def given_scenario_with_parser_path_hash(context: dict) -> None:
+    from scenarios.outstanding import compute_block_only_hash
+
+    context["ppe_body"] = _PARSER_PATH_HASH_BODY
+    # H is the parser-path block-only hash of the body: the value the
+    # scenario's @scenario_hash tag embeds.
+    context["ppe_H"] = compute_block_only_hash(_PARSER_PATH_HASH_BODY)
+
+
+@when(parsers.parse(
+    'I pipe to "scenarios hash" the scenario body alone and separately the '
+    "same body wrapped with preceding @-tags, comment lines, and a Feature "
+    "declaration"
+))
+def when_pipe_body_alone_and_wrapped(context: dict) -> None:
+    body = context["ppe_body"]
+    wrapped = (
+        "@scenario_hash:66e694afa456dbf1 @bc:shopsystem-scenarios "
+        "@origin:adr-056\n"
+        "# a leading comment line\n"
+        "# another comment line\n"
+        "Feature: Scenario integrity validation and schema\n"
+        + body
+    )
+    context["ppe_hash_body"] = _run_scenarios_hash_in_worktree(body)
+    context["ppe_hash_wrapped"] = _run_scenarios_hash_in_worktree(wrapped)
+
+
+@then(parsers.parse("both invocations emit the identical 16-hex hash H"))
+def then_both_emit_identical_H(context: dict) -> None:
+    h_body = context["ppe_hash_body"]
+    h_wrapped = context["ppe_hash_wrapped"]
+    assert re.fullmatch(r"[0-9a-f]{16}", h_body), (
+        f"expected 16 lowercase hex chars; got {h_body!r}"
+    )
+    assert h_body == h_wrapped, (
+        f"body-alone hash {h_body!r} != wrapped-body hash {h_wrapped!r}; "
+        "the raw path must parse-then-hash block-only, not retain surrounding "
+        "tags/comments/Feature as content"
+    )
+    assert h_body == context["ppe_H"], (
+        f"raw-stdin hash {h_body!r} != parser-path block-only hash "
+        f"{context['ppe_H']!r}"
+    )
+
+
+@then(parsers.parse(
+    "H is insensitive to the surrounding tags, comment lines, and Feature line"
+))
+def then_H_insensitive_to_surroundings(context: dict) -> None:
+    # Already proven by the body/wrapped equality above; re-assert the
+    # invariant directly so this step is self-contained and the property is
+    # named explicitly (the wrapped input differs from the bare body ONLY in
+    # the surrounding tags/comments/Feature line, yet the hash is unchanged).
+    assert context["ppe_hash_body"] == context["ppe_hash_wrapped"]
 
 
 # =======================================================================

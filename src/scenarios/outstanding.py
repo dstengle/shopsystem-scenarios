@@ -54,6 +54,27 @@ def compute_block_only_hash(gherkin_text: str) -> str:
     return hashlib.sha256("\n".join(canonical).encode("utf-8")).hexdigest()[:16]
 
 
+def parse_then_block_only_hash(gherkin_text: str) -> str:
+    """Block-only hash of the scenario block parsed out of ``gherkin_text``.
+
+    This is the parse-then-hash reconcile (ADR-056 D5): rather than hashing
+    the raw stdin text — which would retain a surrounding ``Feature:`` line
+    and comment lines as content — it first parses the scenario block out
+    (dropping the ``Feature:`` line, preceding tag lines, and any comment
+    lines that fall outside the block), then hashes that block block-only.
+    The result equals the parser path's (``list``/``count``) block-only hash
+    for the scenario, insensitive to surrounding tags, comments, and the
+    ``Feature:`` line.
+
+    When the text carries no ``Scenario:`` keyword (e.g. a bare step body),
+    it falls back to hashing the whole text block-only, preserving the raw
+    path's long-standing behavior for un-wrapped bodies.
+    """
+    for block in _iter_scenario_blocks(gherkin_text):
+        return compute_block_only_hash(block)
+    return compute_block_only_hash(gherkin_text)
+
+
 def _iter_scenario_blocks(feature_text: str) -> Iterator[str]:
     """Yield each scenario block (keyword + step lines) as raw text.
 

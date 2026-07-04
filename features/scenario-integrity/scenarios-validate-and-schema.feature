@@ -138,3 +138,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate --aggregate" over the corpus
     Then the exit code is 0
     And no violation diagnostic is emitted
+
+  @scenario_hash:66e694afa456dbf1 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: The raw-stdin "scenarios hash" of a scenario equals its parser-path block-only hash
+    Given a scenario whose canonical block-only hash under the parser path is H
+    When I pipe to "scenarios hash" the scenario body alone and separately the same body wrapped with preceding @-tags, comment lines, and a Feature declaration
+    Then both invocations emit the identical 16-hex hash H
+    And H is insensitive to the surrounding tags, comment lines, and Feature line

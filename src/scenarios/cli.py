@@ -57,6 +57,7 @@ import sys
 
 from scenarios.feature import iter_scenarios, iter_tags
 from scenarios.hash import compute_scenario_hash
+from scenarios.outstanding import parse_then_block_only_hash
 from scenarios.journal import (
     harvest_features_tree,
     is_recorded,
@@ -88,7 +89,14 @@ def _cmd_hash(args: argparse.Namespace) -> int:
     gherkin_text = _read_scenario_stdin("hash")
     if gherkin_text is None:
         return 2
-    print(compute_scenario_hash(gherkin_text))
+    # Parse-then-hash reconcile (ADR-056 D5): the raw-stdin `hash` path parses
+    # the scenario block out and hashes it BLOCK-ONLY, so its output equals the
+    # parser path's (`list`/`count`) block-only hash for the scenario and is
+    # insensitive to a surrounding @-tag line, comment lines, and a `Feature:`
+    # declaration. This deprecates the old `awk '/Scenario:/{p=1} p' |
+    # scenarios hash` recompute recipe — pipe the whole scenario (or feature)
+    # text to `scenarios hash` directly.
+    print(parse_then_block_only_hash(gherkin_text))
     return 0
 
 
