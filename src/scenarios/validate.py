@@ -184,6 +184,21 @@ class Validator:
         # distinction the schema requires. The line scan recovers the intended
         # cardinality diagnostic; a single-Feature file then goes to the parser
         # for the genuine E_GHERKIN_PARSE path.
+        # Feature cardinality is decided by a line scan BEFORE trusting the
+        # parser. Off-the-shelf strict Gherkin raises on a file with scenarios
+        # but no enclosing Feature, which would collapse the intended
+        # E_NO_FEATURE diagnostic into a generic E_GHERKIN_PARSE. The line scan
+        # recovers the schema-level cardinality diagnostic; a single-Feature
+        # file still goes to the parser below for the genuine parse path.
+        if self._count_feature_lines(text) == 0:
+            result.add(
+                Violation(
+                    rule=E_NO_FEATURE,
+                    detail="file declares no Feature keyword",
+                )
+            )
+            return result
+
         # Off-the-shelf gherkin-official raises CompositeParserException (or a
         # bare ParserException) on un-parseable input. Catch it and map it to a
         # single E_GHERKIN_PARSE violation so the CLI reports a clean diagnostic
