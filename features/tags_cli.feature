@@ -1,10 +1,7 @@
+@bc:shopsystem-scenarios @origin:lead-03ji
 Feature: shopsystem-scenarios — scenarios tags CLI contract
 
-  # @scenario_hash and @bc are intentionally on separate lines: this
-  # scenario's hash was computed with @bc KEPT in the canonical body
-  # (only the @scenario_hash line is dropped by canonicalization).
-  @scenario_hash:6c12daa42cca1a11
-  @bc:shopsystem-scenarios
+  @scenario_hash:72d3c7d3544bebd7
   Scenario: scenarios tags prints the distinct @-tags across a feature file one per line
     Given a feature file whose scenarios carry two distinct @-tags, one of them repeated
     When I run "scenarios tags" against that feature file

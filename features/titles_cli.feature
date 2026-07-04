@@ -1,10 +1,7 @@
+@bc:shopsystem-scenarios @origin:lead-af8a
 Feature: shopsystem-scenarios — canonicalization and CLI contracts
 
-  # @scenario_hash and @bc are intentionally on separate lines: this
-  # scenario's hash was computed with @bc KEPT in the canonical body
-  # (only the @scenario_hash line is dropped by canonicalization).
-  @scenario_hash:b832e3552a87ed58
-  @bc:shopsystem-scenarios
+  @scenario_hash:1e720a791cb52538
   Scenario: scenarios titles prints each scenario's title one per line for a feature file
     Given a feature file containing two scenarios with distinct titles
     When I run "scenarios titles" against that feature file

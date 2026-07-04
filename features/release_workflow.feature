@@ -1,3 +1,4 @@
+@bc_internal
 Feature: shopsystem-scenarios — release and packaging contracts
 
   @scenario_hash:f49eaa943ed4fb3b @bc:shopsystem-scenarios

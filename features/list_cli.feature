@@ -1,12 +1,7 @@
+@bc:shopsystem-scenarios @origin:lead-5han
 Feature: shopsystem-scenarios — canonicalization and CLI contracts
 
-  # NOTE: the @scenario_hash and @bc tags are intentionally on separate
-  # lines. This scenario's hash (fc3de5729689666d) was computed with the
-  # @bc tag KEPT in the canonical body — only the @scenario_hash line is
-  # dropped by canonicalization. Collapsing the two tags onto one line
-  # would drop @bc with it and change the hash to d7467ae580e1d8bf.
-  @scenario_hash:fc3de5729689666d
-  @bc:shopsystem-scenarios
+  @scenario_hash:d7467ae580e1d8bf
   Scenario: scenarios list prints each scenario's title alongside its @scenario_hash value for a feature file
     Given a feature file containing two scenarios, each preceded by a "@scenario_hash:" tag line carrying that scenario's hash
     When I run "scenarios list" against that feature file
