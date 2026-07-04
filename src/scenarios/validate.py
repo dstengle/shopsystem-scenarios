@@ -232,8 +232,17 @@ class Validator:
         under any configured origin root (adr/ pdr/ briefs/), OR when it is
         shaped like a lead bead id. Otherwise the @origin is unknown.
         """
+        # An origin root may be named either as a decision-record directory
+        # itself (the ``adr``/``pdr``/``briefs`` default model) or as a parent
+        # dir that CONTAINS those subdirs. Search both shapes: the root
+        # directly, and each of its adr/pdr/briefs subdirs.
+        search_dirs: List[Path] = []
         for root in self.origin_roots:
             base = Path(root)
+            search_dirs.append(base)
+            for sub in ("adr", "pdr", "briefs"):
+                search_dirs.append(base / sub)
+        for base in search_dirs:
             if (base / f"{ref}.md").exists() or (base / ref).exists():
                 return True
         for prefix in _LEAD_BEAD_PREFIXES:
@@ -393,6 +402,20 @@ class Validator:
                     ),
                 )
             )
+        else:
+            (origin_value,) = origin_values
+            if not self._origin_resolves(origin_value):
+                result.add(
+                    Violation(
+                        rule=E_UNKNOWN_ORIGIN,
+                        line=feature_line,
+                        origin=origin_value,
+                        detail=(
+                            f"@origin value {origin_value!r} resolves to no known "
+                            "decision record or lead bead id"
+                        ),
+                    )
+                )
 
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
