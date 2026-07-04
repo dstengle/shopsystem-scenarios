@@ -184,10 +184,17 @@ class Validator:
         # distinction the schema requires. The line scan recovers the intended
         # cardinality diagnostic; a single-Feature file then goes to the parser
         # for the genuine E_GHERKIN_PARSE path.
-        # Foundation slice, behavior 1 (happy path): a fully conformant file
-        # yields zero violations. The parse-failure and Feature-cardinality
-        # rules are added below in their own RED->GREEN behaviors.
-        self._parse(text)
+        # Off-the-shelf gherkin-official raises CompositeParserException (or a
+        # bare ParserException) on un-parseable input. Catch it and map it to a
+        # single E_GHERKIN_PARSE violation so the CLI reports a clean diagnostic
+        # instead of crashing with a traceback (ADR-056). The parser's first
+        # error line is carried as detail for the reader.
+        try:
+            self._parse(text)
+        except (CompositeParserException, ParserException) as exc:
+            first_line = str(exc).splitlines()[0] if str(exc) else None
+            result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
+            return result
 
         # Exactly one Feature and the file parses. The @bc/@origin/
         # @scenario_hash dimension rules (slice 1b) will add their checks here,
