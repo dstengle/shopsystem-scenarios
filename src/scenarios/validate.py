@@ -434,51 +434,58 @@ class Validator:
     ) -> ValidationResult:
         result = ValidationResult(file=file)
 
-        # Feature cardinality is decided by a line scan BEFORE trusting the
-        # parser, because off-the-shelf strict Gherkin raises on both zero
-        # Feature (a Scenario with no enclosing Feature) and a second Feature.
-        # A raw parse error would collapse both distinct schema violations
-        # (E_NO_FEATURE, E_MULTI_FEATURE) into E_GHERKIN_PARSE and lose the
-        # distinction the schema requires. The line scan recovers the intended
-        # cardinality diagnostic; a single-Feature file then goes to the parser
-        # for the genuine E_GHERKIN_PARSE path.
-        # Feature cardinality is decided by a line scan BEFORE trusting the
-        # parser. Off-the-shelf strict Gherkin raises on a file with scenarios
-        # but no enclosing Feature, which would collapse the intended
-        # E_NO_FEATURE diagnostic into a generic E_GHERKIN_PARSE. The line scan
-        # recovers the schema-level cardinality diagnostic; a single-Feature
-        # file still goes to the parser below for the genuine parse path.
-        feature_count = self._count_feature_lines(text)
-        if feature_count == 0:
+        # Feature cardinality is decided by the gherkin-official PARSER's
+        # Feature-node count, NOT a raw ``Feature:`` line scan (lead-vzxd.7
+        # defect B). A valid single Feature whose DESCRIPTION prose contains the
+        # substring "Feature:" parses to exactly ONE Feature node; a raw line
+        # scan would miscount it as two and fire a false E_MULTI_FEATURE. So the
+        # parser is the authority on cardinality.
+        #
+        # Off-the-shelf strict Gherkin RAISES on both zero Feature (an orphan
+        # Scenario with no enclosing Feature) and a genuine second Feature, and
+        # both raise the SAME exception — so a parse failure alone cannot tell
+        # E_NO_FEATURE from E_MULTI_FEATURE from a genuine E_GHERKIN_PARSE. The
+        # ``Feature:`` line scan is retained SOLELY as the disambiguator on a
+        # parse failure: line-count 0 -> E_NO_FEATURE, line-count >= 2 ->
+        # E_MULTI_FEATURE, else a genuine E_GHERKIN_PARSE. A file that PARSES
+        # never consults the line scan, so prose containing "Feature:" cannot
+        # trip a cardinality violation.
+        try:
+            document = self._parse(text)
+        except (CompositeParserException, ParserException) as exc:
+            feature_line_count = self._count_feature_lines(text)
+            if feature_line_count == 0:
+                result.add(
+                    Violation(
+                        rule=E_NO_FEATURE,
+                        detail="file declares no Feature keyword",
+                    )
+                )
+            elif feature_line_count > 1:
+                result.add(
+                    Violation(
+                        rule=E_MULTI_FEATURE,
+                        detail=(
+                            f"file declares {feature_line_count} Feature "
+                            "keywords (expected exactly one)"
+                        ),
+                    )
+                )
+            else:
+                first_line = str(exc).splitlines()[0] if str(exc) else None
+                result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
+            return result
+
+        # The file parsed. A parsed document with NO Feature node (e.g. an empty
+        # or comment-only file) is E_NO_FEATURE — off-the-shelf gherkin returns
+        # a document whose ``feature`` is None rather than raising in that case.
+        if document.get("feature") is None:
             result.add(
                 Violation(
                     rule=E_NO_FEATURE,
                     detail="file declares no Feature keyword",
                 )
             )
-            return result
-        if feature_count > 1:
-            result.add(
-                Violation(
-                    rule=E_MULTI_FEATURE,
-                    detail=(
-                        f"file declares {feature_count} Feature keywords "
-                        "(expected exactly one)"
-                    ),
-                )
-            )
-            return result
-
-        # Off-the-shelf gherkin-official raises CompositeParserException (or a
-        # bare ParserException) on un-parseable input. Catch it and map it to a
-        # single E_GHERKIN_PARSE violation so the CLI reports a clean diagnostic
-        # instead of crashing with a traceback (ADR-056). The parser's first
-        # error line is carried as detail for the reader.
-        try:
-            document = self._parse(text)
-        except (CompositeParserException, ParserException) as exc:
-            first_line = str(exc).splitlines()[0] if str(exc) else None
-            result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
             return result
 
         # A feature-level @bc_internal tag marks the whole file as BC-INTERNAL
