@@ -79,3 +79,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending scenario and the rule code E_MISSING_HASH
+
+  @scenario_hash:88f87cd987b8477d @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A scenario whose @scenario_hash differs from its parser-path block-only hash is rejected with E_HASH_MISMATCH
+    Given a scenario whose embedded @scenario_hash value does not equal the block-only hash computed over its body via the parser path
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending scenario together with both the embedded and the recomputed hash and the rule code E_HASH_MISMATCH

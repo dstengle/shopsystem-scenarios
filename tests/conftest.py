@@ -2396,3 +2396,58 @@ def given_scenario_no_hash(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=text)
     )
+
+
+# -- E_HASH_MISMATCH (scenario 8) ---------------------------------------
+
+
+_MISMATCH_TITLE = "A scenario whose embedded hash is stale"
+_MISMATCH_EMBEDDED = "0000000000000000"  # 16-hex, deliberately != true block hash
+
+
+@given(
+    "a scenario whose embedded @scenario_hash value does not equal the "
+    "block-only hash computed over its body via the parser path"
+)
+def given_scenario_hash_mismatch(context: dict, tmp_path) -> None:
+    # A scenario carrying a literal @scenario_hash that is NOT the block-only
+    # hash of its body. The builder emits the literal verbatim (hash_tag=<hex>),
+    # so the on-disk tag is a genuine stale/fabricated hash.
+    steps = ["Given a precondition", "When an action occurs", "Then an outcome"]
+    block = ScenarioBlock(_MISMATCH_TITLE, steps, hash_tag=_MISMATCH_EMBEDDED)
+    true_hash = compute_scenario_hash(block.block_text())
+    assert true_hash != _MISMATCH_EMBEDDED, "fixture must embed a WRONG hash"
+    text = build_feature_text(scenarios=[block])
+    context["offending_scenario_title"] = _MISMATCH_TITLE
+    context["embedded_hash"] = _MISMATCH_EMBEDDED
+    context["recomputed_hash"] = true_hash
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
+
+
+@then(
+    parsers.parse(
+        "the diagnostic names the offending scenario together with both the "
+        "embedded and the recomputed hash and the rule code {rule_code}"
+    )
+)
+def then_diagnostic_names_scenario_and_both_hashes(
+    context: dict, rule_code: str
+) -> None:
+    stderr = context.get("cli_stderr", "")
+    title = context["offending_scenario_title"]
+    embedded = context["embedded_hash"]
+    recomputed = context["recomputed_hash"]
+    assert rule_code in stderr, (
+        f"expected rule code {rule_code!r} in diagnostic; got:\n{stderr}"
+    )
+    assert title in stderr, (
+        f"expected offending scenario {title!r} named; got:\n{stderr}"
+    )
+    assert embedded in stderr, (
+        f"expected embedded hash {embedded!r} named; got:\n{stderr}"
+    )
+    assert recomputed in stderr, (
+        f"expected recomputed hash {recomputed!r} named; got:\n{stderr}"
+    )
