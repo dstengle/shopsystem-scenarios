@@ -2084,3 +2084,31 @@ def given_no_feature_file(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=_NO_FEATURE_FILE)
     )
+
+
+# -- E_MULTI_FEATURE (scenario 4) ---------------------------------------
+
+
+_TWO_FEATURE_FILE = (
+    "@bc:shopsystem-scenarios @origin:adr-056\n"
+    "Feature: the first feature\n"
+    "  Scenario: s1\n"
+    "    Given a precondition\n"
+    "    Then an outcome\n"
+    "\n"
+    "Feature: the second feature\n"
+    "  Scenario: s2\n"
+    "    Given another precondition\n"
+    "    Then another outcome\n"
+)
+
+
+@given("a scenario file that declares two Feature keywords")
+def given_two_feature_file(context: dict, tmp_path) -> None:
+    # Two Feature keywords. Off-the-shelf Gherkin rejects the second Feature as
+    # a parse error; the cardinality pre-scan must recover the intended
+    # E_MULTI_FEATURE diagnostic rather than surfacing E_GHERKIN_PARSE.
+    assert _TWO_FEATURE_FILE.count("Feature:") == 2
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=_TWO_FEATURE_FILE)
+    )
