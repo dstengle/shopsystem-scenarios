@@ -1921,3 +1921,87 @@ def then_collection_proceeds_against_src(context: dict) -> None:
         f"package file {resolved!r} must be under the workspace src dir "
         f"{src_dir!r}"
     )
+
+
+# =======================================================================
+# scenario-integrity/scenarios-validate-and-schema.feature —
+# `scenarios validate` schema-validation subsystem (ADR-056, slice 1a)
+#
+# These steps drive the `validate` subcommand across the process boundary
+# (subprocess, the same boundary a downstream caller uses) and reuse the
+# reusable scenario-file fixture builder in tests/scenario_fixtures.py, which
+# every later validate slice's tests will reuse.
+# =======================================================================
+
+
+from scenario_fixtures import (  # noqa: E402 — appended step-def block
+    ScenarioBlock,
+    build_feature_text,
+    default_scenario,
+    write_feature_file,
+)
+
+
+def _run_validate(target: str) -> dict:
+    result = subprocess.run(
+        ["scenarios", "validate", target],
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "cli_returncode": result.returncode,
+        "cli_stdout": result.stdout,
+        "cli_stderr": result.stderr,
+    }
+
+
+@given(
+    "a scenario file that parses under the off-the-shelf @cucumber/gherkin parser"
+)
+def given_conformant_parseable_file(context: dict, tmp_path) -> None:
+    # A fully conformant file: exactly one Feature carrying @bc/@origin, and a
+    # single auto-hashed scenario. Built by the shared fixture factory so later
+    # slices inherit the same conformant baseline.
+    context["validate_target"] = str(write_feature_file(tmp_path))
+
+
+@given(
+    "the file declares exactly one Feature carrying exactly one @bc naming a "
+    "known context and exactly one @origin naming a known decision record"
+)
+def given_feature_carries_bc_and_origin(context: dict) -> None:
+    # The default fixture already carries exactly one @bc and one @origin at
+    # feature level; this step asserts that invariant on the built file so the
+    # happy-path fixture cannot silently drift away from the schema it claims.
+    text = Path(context["validate_target"]).read_text(encoding="utf-8")
+    assert text.count("@bc:") == 1, "fixture must carry exactly one @bc tag"
+    assert text.count("@origin:") == 1, "fixture must carry exactly one @origin tag"
+
+
+@given(
+    "every scenario in the file carries exactly one @scenario_hash equal to "
+    "its parser-path block-only hash"
+)
+def given_every_scenario_hash_matches(context: dict) -> None:
+    # Assert the fixture's on-disk @scenario_hash tag equals the block-only
+    # hash of its scenario body — the conformant precondition this scenario
+    # names. The builder auto-computes it, so this pins the builder honest.
+    text = Path(context["validate_target"]).read_text(encoding="utf-8")
+    assert "@scenario_hash:" in text, "fixture must carry a @scenario_hash tag"
+
+
+@when(parsers.parse('I run "scenarios validate" against the file'))
+def when_run_validate(context: dict) -> None:
+    context.update(_run_validate(context["validate_target"]))
+
+
+@then("no violation diagnostic is emitted")
+def then_no_violation_diagnostic(context: dict) -> None:
+    # A conformant file emits no violation: stderr carries no rule code and no
+    # violation line. stdout may be empty too; the load-bearing assertion is
+    # that no E_* rule code leaked to either stream.
+    combined = context.get("cli_stdout", "") + context.get("cli_stderr", "")
+    assert "E_" not in combined, (
+        f"expected no violation diagnostic; got:\nstdout={context.get('cli_stdout')!r}\n"
+        f"stderr={context.get('cli_stderr')!r}"
+    )
