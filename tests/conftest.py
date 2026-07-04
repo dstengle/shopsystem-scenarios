@@ -2334,3 +2334,42 @@ def given_feature_two_origin(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=text)
     )
+
+
+# -- E_UNKNOWN_ORIGIN (scenario 6) --------------------------------------
+
+
+# A ref that resolves to no file under the fixture origin root's adr/pdr/briefs
+# (no adr-999.md is created) and does not carry a lead-bead prefix — so neither
+# resolution path accepts it, and E_UNKNOWN_ORIGIN must fire.
+_UNKNOWN_ORIGIN_VALUE = "adr-999"
+
+
+@given(
+    "a scenario file whose Feature carries an @origin ref that matches no file "
+    "under adr, pdr, or briefs and no lead bead id"
+)
+def given_feature_unknown_origin(context: dict, tmp_path) -> None:
+    text = build_feature_text(
+        feature_tags=("@bc:shopsystem-scenarios", f"@origin:{_UNKNOWN_ORIGIN_VALUE}")
+    )
+    context["offending_origin_value"] = _UNKNOWN_ORIGIN_VALUE
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
+
+
+@then(
+    parsers.parse(
+        "the diagnostic names the offending @origin value and the rule code {rule_code}"
+    )
+)
+def then_diagnostic_names_origin_value_and_rule(context: dict, rule_code: str) -> None:
+    stderr = context.get("cli_stderr", "")
+    value = context["offending_origin_value"]
+    assert rule_code in stderr, (
+        f"expected rule code {rule_code!r} in diagnostic; got:\n{stderr}"
+    )
+    assert value in stderr, (
+        f"expected offending @origin value {value!r} named in diagnostic; got:\n{stderr}"
+    )

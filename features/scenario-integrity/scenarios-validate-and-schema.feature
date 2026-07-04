@@ -65,3 +65,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending feature and the rule code E_MULTI_ORIGIN
+
+  @scenario_hash:00c1012eca30b666 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A feature whose @origin value resolves to no known decision record is rejected with E_UNKNOWN_ORIGIN
+    Given a scenario file whose Feature carries an @origin ref that matches no file under adr, pdr, or briefs and no lead bead id
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending @origin value and the rule code E_UNKNOWN_ORIGIN
