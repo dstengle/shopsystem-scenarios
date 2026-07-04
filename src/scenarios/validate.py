@@ -72,6 +72,16 @@ E_UNKNOWN_SERVICE = "E_UNKNOWN_SERVICE"
 W_BC_UNASSIGNED = "W_BC_UNASSIGNED"
 W_ORIGIN_UNRESOLVED = "W_ORIGIN_UNRESOLVED"
 
+# A stray legacy ``.gherkin`` file under the corpus dir (lead-vzxd.7 defect D).
+# ``--aggregate`` globs ``*.feature`` only, so an unmigrated ``.gherkin`` file
+# is INVISIBLE to the per-file gate — leaving the aggregate gate satisfiable by
+# simply not migrating a file. This finding keeps the gate RED while ANY
+# ``.gherkin`` remains under the corpus dir, naming the stray file, so the
+# migration cannot be silently skipped. It is a corpus-level guard (like the
+# W_ markers) rather than a per-file schema rule, but it is a hard error (E_):
+# a stray ``.gherkin`` is a migration DEFECT, not a transitional placeholder.
+E_STRAY_GHERKIN = "E_STRAY_GHERKIN"
+
 # Protocol @bc tokens that are legal owners but are NOT Bounded Contexts, so
 # they live in code rather than in the bc-manifest.yaml bcs registry (ADR-056
 # D10): the lead product token and the unassigned sentinel.
@@ -802,6 +812,12 @@ class AggregateResult:
 # gated as one whole.
 _FEATURE_GLOB = "*.feature"
 
+# The legacy pre-migration extension. A corpus is fully migrated only when it
+# carries ZERO of these; the aggregate gate goes RED (E_STRAY_GHERKIN) while any
+# remain, so an unmigrated file cannot hide behind the ``*.feature`` glob
+# (lead-vzxd.7 defect D).
+_STRAY_GLOB = "*.gherkin"
+
 
 def _corpus_file_is_bc_internal(path: Path) -> bool:
     """True iff the feature file at ``path`` carries the @bc_internal exemption.
@@ -852,6 +868,24 @@ def validate_corpus(
     markers.
     """
     result = AggregateResult()
+
+    # Stray-.gherkin guard (lead-vzxd.7 defect D): the gate globs ``*.feature``
+    # only, so a legacy ``.gherkin`` file would be invisible and let an
+    # unmigrated corpus satisfy the gate. Scan the tree for ``.gherkin`` files
+    # and surface each as an E_STRAY_GHERKIN finding, keeping the gate RED while
+    # any remain. Deterministic (sorted) order so the diagnostic is reproducible.
+    for stray in sorted(Path(corpus_dir).rglob(_STRAY_GLOB)):
+        result.add(
+            AggregateFinding(
+                code=E_STRAY_GHERKIN,
+                file=str(stray),
+                detail=(
+                    "legacy .gherkin file remains under the corpus "
+                    "(migrate it to .feature before the aggregate gate can pass)"
+                ),
+            )
+        )
+
     # Deterministic order so the diagnostic is reproducible run-to-run.
     files = sorted(Path(corpus_dir).rglob(_FEATURE_GLOB))
     for path in files:
