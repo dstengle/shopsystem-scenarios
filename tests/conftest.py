@@ -1991,8 +1991,14 @@ def given_every_scenario_hash_matches(context: dict) -> None:
 
 
 @when(parsers.parse('I run "scenarios validate" against the file'))
-def when_run_validate(context: dict) -> None:
-    context.update(_run_validate(context["validate_target"]))
+def when_run_validate(context: dict, tmp_path) -> None:
+    # Single when-step for every validate scenario (1a and 1b). It runs the
+    # subcommand with a fixture manifest + origin root under tmp_path so the
+    # tag-dimension rules (slice 1b) resolve against test-pinned legal sets.
+    # Slice-1a scenarios early-return before the tag checks (parse / cardinality
+    # failures) or are fully conformant against these fixtures, so routing them
+    # through the same fixtured path leaves their outcomes unchanged.
+    _run_validate_with_fixtures(context, context["validate_target"], tmp_path)
 
 
 @then("no violation diagnostic is emitted")
@@ -2111,4 +2117,127 @@ def given_two_feature_file(context: dict, tmp_path) -> None:
     assert _TWO_FEATURE_FILE.count("Feature:") == 2
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=_TWO_FEATURE_FILE)
+    )
+
+
+# =======================================================================
+# scenario-integrity/scenarios-validate-and-schema.feature —
+# `scenarios validate` tag-dimension rules (ADR-056, slice 1b)
+#
+# These scenarios exercise the @bc / @origin / @scenario_hash / @service
+# dimension rules. Each supplies its OWN fixture manifest + origin roots under
+# tmp_path (never the repo-root bc-manifest.yaml), so the legal-value sets are
+# pinned by the test rather than by whatever the corpus happens to carry, and
+# runs validate with --manifest / --origin-root pointed at those fixtures.
+# =======================================================================
+
+
+# The manifest fixture every slice-1b scenario resolves @bc / @service against.
+# shopsystem-scenarios is a known BC; postgres is a known service. Absent from
+# both lists: any other token, so the unknown-value rules can fire.
+_FIXTURE_MANIFEST = {
+    "bcs": [
+        "shopsystem-messaging",
+        "shopsystem-scenarios",
+        "shopsystem-templates",
+        "shopsystem-bc-launcher",
+    ],
+    "services": ["postgres", "agent-vault-broker"],
+}
+
+
+def _write_fixture_manifest(tmp_path) -> Path:
+    path = tmp_path / "bc-manifest.yaml"
+    path.write_text(yaml.safe_dump(_FIXTURE_MANIFEST), encoding="utf-8")
+    return path
+
+
+def _write_fixture_origin_root(tmp_path) -> Path:
+    # An origin root whose adr/ carries adr-056.md — the ref the conformant
+    # fixtures name (@origin:adr-056) resolves to an existing file here.
+    root = tmp_path / "origin"
+    (root / "adr").mkdir(parents=True)
+    (root / "adr" / "adr-056.md").write_text("# ADR-056\n", encoding="utf-8")
+    (root / "pdr").mkdir()
+    (root / "briefs").mkdir()
+    return root
+
+
+def _run_validate_with_fixtures(context: dict, target: str, tmp_path) -> None:
+    # Run validate with a fixture manifest + origin root so the tag-dimension
+    # rules resolve against test-pinned legal sets, not the repo-root file.
+    manifest = context.get("fixture_manifest") or _write_fixture_manifest(tmp_path)
+    origin_root = context.get("fixture_origin_root") or _write_fixture_origin_root(
+        tmp_path
+    )
+    result = subprocess.run(
+        [
+            "scenarios",
+            "validate",
+            target,
+            "--manifest",
+            str(manifest),
+            "--origin-root",
+            str(origin_root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    context.update(
+        {
+            "cli_returncode": result.returncode,
+            "cli_stdout": result.stdout,
+            "cli_stderr": result.stderr,
+        }
+    )
+
+
+@then(
+    parsers.parse(
+        "the diagnostic names the offending feature and the rule code {rule_code}"
+    )
+)
+def then_diagnostic_names_feature_and_rule(context: dict, rule_code: str) -> None:
+    # The violation diagnostic must name the offending file (the "feature") and
+    # the stable rule code. Shared across the feature-level dimension rules
+    # (E_MISSING_BC / E_MULTI_BC / E_MISSING_ORIGIN / E_MULTI_ORIGIN).
+    stderr = context.get("cli_stderr", "")
+    target = context["validate_target"]
+    assert rule_code in stderr, (
+        f"expected rule code {rule_code!r} in diagnostic; got:\n{stderr}"
+    )
+    assert target in stderr, (
+        f"expected offending feature file {target!r} named in diagnostic; got:\n{stderr}"
+    )
+
+
+@then(
+    parsers.parse(
+        "the diagnostic names the offending scenario and the rule code {rule_code}"
+    )
+)
+def then_diagnostic_names_scenario_and_rule(context: dict, rule_code: str) -> None:
+    # A per-scenario rule (E_MISSING_HASH) names the offending scenario (its
+    # title) and the rule code, so a reader can locate the exact scenario.
+    stderr = context.get("cli_stderr", "")
+    title = context["offending_scenario_title"]
+    assert rule_code in stderr, (
+        f"expected rule code {rule_code!r} in diagnostic; got:\n{stderr}"
+    )
+    assert title in stderr, (
+        f"expected offending scenario {title!r} named in diagnostic; got:\n{stderr}"
+    )
+
+
+# -- E_MISSING_BC (scenario 1) ------------------------------------------
+
+
+@given("a scenario file whose Feature carries no @bc tag")
+def given_feature_no_bc(context: dict, tmp_path) -> None:
+    # A Feature carrying @origin but NO @bc tag. Every scenario is otherwise
+    # conformant (auto-hashed), so the sole violation is the missing owner.
+    text = build_feature_text(feature_tags=("@origin:adr-056",))
+    assert "@bc:" not in text, "fixture must carry no @bc tag"
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
     )
