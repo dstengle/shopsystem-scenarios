@@ -64,6 +64,7 @@ from scenarios.journal import (
     write_journal_entries,
 )
 from scenarios.validate import Validator, validate_corpus
+from scenarios.create import create_feature_text
 
 
 def _read_scenario_stdin(command: str) -> str | None:
@@ -233,6 +234,27 @@ def _cmd_validate_aggregate(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _cmd_create(args: argparse.Namespace) -> int:
+    # Emit a Feature-headed grouped Gherkin file (ADR-056 D12) from one or
+    # more bare scenario-body FILES plus a target @bc / @origin. Each body
+    # file is a bare scenario block (Scenario: keyword + step lines, no tags);
+    # the helper wraps them into one Feature carrying the feature-level
+    # @bc/@origin and tags each scenario with its parser-path block-only
+    # @scenario_hash, so the output passes `scenarios validate` when the
+    # chosen @bc/@origin are legal.
+    bodies = [
+        open(path, encoding="utf-8").read() for path in args.body_file
+    ]
+    text = create_feature_text(
+        feature_name=args.feature_name,
+        bc=args.bc,
+        origin=args.origin,
+        scenario_bodies=bodies,
+    )
+    sys.stdout.write(text)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="scenarios")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -388,6 +410,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     validate_cmd.set_defaults(func=_cmd_validate)
+
+    create_cmd = sub.add_parser(
+        "create",
+        help=(
+            "emit a Feature-headed grouped scenario file from bare scenario-body "
+            "files plus a target @bc/@origin (output passes `scenarios validate`)"
+        ),
+    )
+    create_cmd.add_argument(
+        "--feature-name",
+        required=True,
+        help="the Feature: name for the emitted grouped file",
+    )
+    create_cmd.add_argument(
+        "--bc",
+        required=True,
+        help="the feature-level @bc owner tag value (a known context)",
+    )
+    create_cmd.add_argument(
+        "--origin",
+        required=True,
+        help="the feature-level @origin provenance tag value (a resolving ref)",
+    )
+    create_cmd.add_argument(
+        "body_file",
+        nargs="+",
+        help=(
+            "one or more bare scenario-body files (Scenario: keyword + steps, "
+            "no tags); each is grouped under the emitted Feature and tagged with "
+            "its parser-path block-only @scenario_hash"
+        ),
+    )
+    create_cmd.set_defaults(func=_cmd_create)
 
     return parser
 
