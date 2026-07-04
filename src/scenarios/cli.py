@@ -65,6 +65,7 @@ from scenarios.journal import (
 )
 from scenarios.validate import Validator, validate_corpus
 from scenarios.create import create_feature_text
+from scenarios.consolidate import consolidate_bare_files
 
 
 def _read_scenario_stdin(command: str) -> str | None:
@@ -250,6 +251,21 @@ def _cmd_create(args: argparse.Namespace) -> int:
         bc=args.bc,
         origin=args.origin,
         scenario_bodies=bodies,
+    )
+    sys.stdout.write(text)
+    return 0
+
+
+def _cmd_consolidate(args: argparse.Namespace) -> int:
+    # Merge two-or-more BARE single-scenario FILES into one Feature-headed
+    # grouped file (ADR-056 D12) with an inherited @bc/@origin. Hash-preserving:
+    # each scenario's @scenario_hash after consolidation equals its
+    # pre-consolidation block-only hash (the body is unchanged).
+    text = consolidate_bare_files(
+        args.bare_file,
+        feature_name=args.feature_name,
+        bc=args.bc,
+        origin=args.origin,
     )
     sys.stdout.write(text)
     return 0
@@ -443,6 +459,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     create_cmd.set_defaults(func=_cmd_create)
+
+    consolidate_cmd = sub.add_parser(
+        "consolidate",
+        help=(
+            "merge bare single-scenario files into one Feature-headed grouped "
+            "file with inherited @bc/@origin (hash-preserving)"
+        ),
+    )
+    consolidate_cmd.add_argument(
+        "--feature-name",
+        required=True,
+        help="the Feature: name for the consolidated grouped file",
+    )
+    consolidate_cmd.add_argument(
+        "--bc",
+        required=True,
+        help="the inherited feature-level @bc owner tag value",
+    )
+    consolidate_cmd.add_argument(
+        "--origin",
+        required=True,
+        help="the inherited feature-level @origin provenance tag value",
+    )
+    consolidate_cmd.add_argument(
+        "bare_file",
+        nargs="+",
+        help=(
+            "two or more bare single-scenario files to merge; each scenario's "
+            "@scenario_hash is preserved (equals its pre-consolidation "
+            "block-only hash)"
+        ),
+    )
+    consolidate_cmd.set_defaults(func=_cmd_consolidate)
 
     return parser
 
