@@ -225,3 +225,86 @@ def test_genuine_two_feature_file_still_trips_multi_feature(tmp_path):
         "two genuine Feature nodes must still trip E_MULTI_FEATURE; got: "
         f"{[(v.rule, v.detail) for v in result.violations]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# DEFECT D — --aggregate goes RED while any .gherkin file remains.
+# ---------------------------------------------------------------------------
+
+
+def _write_conformant_product_file(corpus: Path, name: str) -> None:
+    from scenario_fixtures import build_feature_text, default_scenario
+
+    text = build_feature_text(
+        feature_name=f"conformant product feature {name}",
+        feature_tags=("@bc:shopsystem-scenarios", "@origin:lead-vzxd.1"),
+        scenarios=[default_scenario(f"product scenario {name}")],
+    )
+    (corpus / f"product_{name}.feature").write_text(text, encoding="utf-8")
+
+
+def test_aggregate_red_while_a_gherkin_file_remains(tmp_path):
+    # A corpus whose product .feature files are ALL conformant but which still
+    # carries a legacy .gherkin file. The .feature glob makes the .gherkin file
+    # invisible, so before the defect-D fix the gate wrongly goes GREEN. The
+    # guard must keep it RED and name the stray .gherkin file with the stable
+    # E_STRAY_GHERKIN code.
+    from scenarios.validate import E_STRAY_GHERKIN
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _write_conformant_product_file(corpus, "a")
+    stray = corpus / "legacy_unmigrated.gherkin"
+    stray.write_text("Feature: an unmigrated legacy scenario\n", encoding="utf-8")
+
+    result = validate_corpus(
+        str(corpus), manifest_path=str(_write_manifest(tmp_path))
+    )
+    assert not result.ok, (
+        "a corpus carrying a .gherkin file must keep --aggregate RED"
+    )
+    assert result.exit_code != 0
+    stray_findings = [f for f in result.findings if f.code == E_STRAY_GHERKIN]
+    assert len(stray_findings) == 1, (
+        f"expected one E_STRAY_GHERKIN finding; got: "
+        f"{[(f.code, f.file) for f in result.findings]}"
+    )
+    assert "legacy_unmigrated.gherkin" in stray_findings[0].file
+
+
+def test_aggregate_nested_gherkin_file_is_found(tmp_path):
+    # The guard is recursive: a .gherkin file in a nested subdir must also keep
+    # the gate RED (the corpus is gated as one whole tree).
+    from scenarios.validate import E_STRAY_GHERKIN
+
+    corpus = tmp_path / "corpus"
+    (corpus / "sub").mkdir(parents=True)
+    _write_conformant_product_file(corpus, "a")
+    (corpus / "sub" / "buried.gherkin").write_text(
+        "Feature: buried unmigrated scenario\n", encoding="utf-8"
+    )
+    result = validate_corpus(
+        str(corpus), manifest_path=str(_write_manifest(tmp_path))
+    )
+    assert not result.ok
+    stray = [f for f in result.findings if f.code == E_STRAY_GHERKIN]
+    assert len(stray) == 1, [(f.code, f.file) for f in result.findings]
+    assert "buried.gherkin" in stray[0].file
+
+
+def test_aggregate_green_when_no_gherkin_and_all_conformant(tmp_path):
+    # Removing the .gherkin file (zero .gherkin, all product files conformant)
+    # returns the gate to GREEN (exit 0). This pins the guard honest: it fires
+    # ONLY on a stray .gherkin, not on a clean migrated corpus.
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _write_conformant_product_file(corpus, "a")
+    _write_conformant_product_file(corpus, "b")
+    result = validate_corpus(
+        str(corpus), manifest_path=str(_write_manifest(tmp_path))
+    )
+    assert result.ok, (
+        "a corpus with zero .gherkin files and all-conformant product files "
+        f"must be GREEN; got findings: {[(f.code, f.file) for f in result.findings]}"
+    )
+    assert result.exit_code == 0
