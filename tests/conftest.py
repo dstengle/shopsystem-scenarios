@@ -2052,3 +2052,35 @@ def then_diagnostic_names_file_and_rule(context: dict, rule_code: str) -> None:
     assert target in stderr, (
         f"expected offending file {target!r} named in diagnostic; got:\n{stderr}"
     )
+
+
+# -- E_NO_FEATURE (scenario 3) ------------------------------------------
+
+
+_NO_FEATURE_FILE = (
+    "@bc:shopsystem-scenarios @origin:adr-056\n"
+    "  Scenario: an orphan scenario with no enclosing Feature\n"
+    "    Given a precondition\n"
+    "    When an action occurs\n"
+    "    Then an outcome is observed\n"
+    "\n"
+    "  Scenario: a second orphan scenario\n"
+    "    Given another precondition\n"
+    "    Then another outcome\n"
+)
+
+
+@given(
+    "a scenario file that contains one or more scenarios but declares no "
+    "Feature keyword"
+)
+def given_no_feature_file(context: dict, tmp_path) -> None:
+    # Scenarios are present but there is no Feature keyword at all. Under strict
+    # off-the-shelf Gherkin this would itself raise a parse error; the
+    # validator's Feature-cardinality pre-scan must recover the *intended*
+    # E_NO_FEATURE diagnostic rather than collapsing it into E_GHERKIN_PARSE.
+    assert "Scenario:" in _NO_FEATURE_FILE
+    assert "Feature:" not in _NO_FEATURE_FILE
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=_NO_FEATURE_FILE)
+    )
