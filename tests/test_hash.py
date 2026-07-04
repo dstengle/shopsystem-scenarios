@@ -143,6 +143,57 @@ def test_cli_verify_rejects_empty_stdin_instead_of_false_mismatch():
     assert "stdin" in result.stderr.lower()
 
 
+def test_cli_hash_of_wrapped_body_equals_parser_path_block_only_hash():
+    # ADR-056 D5 / scenario 66e694afa456dbf1: the raw-stdin `scenarios hash`
+    # of a scenario body alone, and of the SAME body wrapped with preceding
+    # @-tags, comment lines, and a Feature declaration, must both emit the
+    # identical 16-hex block-only hash H. The raw path must parse-then-hash
+    # the scenario block, staying insensitive to surrounding tags, comment
+    # lines, and the Feature line — reconciling it to the parser path
+    # (`list`/`count`) rather than retaining that surrounding text as content.
+    body = (
+        'Scenario: The raw-stdin "scenarios hash" of a scenario equals its '
+        "parser-path block-only hash\n"
+        "    Given a scenario whose canonical block-only hash under the "
+        "parser path is H\n"
+        '    When I pipe to "scenarios hash" the scenario body alone and '
+        "separately the same body wrapped with preceding @-tags, comment "
+        "lines, and a Feature declaration\n"
+        "    Then both invocations emit the identical 16-hex hash H\n"
+        "    And H is insensitive to the surrounding tags, comment lines, "
+        "and Feature line"
+    )
+    wrapped = (
+        "@scenario_hash:66e694afa456dbf1 @bc:shopsystem-scenarios "
+        "@origin:adr-056\n"
+        "# a leading comment line\n"
+        "# another comment line\n"
+        "Feature: Scenario integrity validation and schema\n"
+        + body
+    )
+
+    def raw_hash(text: str) -> str:
+        result = subprocess.run(
+            _CLI + ["hash"],
+            input=text,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stderr == ""
+        return result.stdout.strip()
+
+    h_body = raw_hash(body)
+    h_wrapped = raw_hash(wrapped)
+
+    # Both invocations emit the identical 16-hex H...
+    assert len(h_body) == 16
+    assert h_body == h_wrapped
+    # ...equal to the parser-path block-only hash of the body (the value the
+    # @scenario_hash tag embeds).
+    assert h_body == "66e694afa456dbf1"
+
+
 def test_cli_verify_rejects_whitespace_only_stdin():
     # Whitespace-only stdin canonicalizes to the empty body just like truly
     # empty stdin, so it must hit the same guard rather than silently
