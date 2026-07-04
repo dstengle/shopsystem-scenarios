@@ -372,6 +372,17 @@ class Validator:
                     )
                 )
 
+        # -- @origin: exactly one, resolving to a known record --------------
+        origin_values = self._values_for(feature_tags, "origin")
+        if len(origin_values) == 0:
+            result.add(
+                Violation(
+                    rule=E_MISSING_ORIGIN,
+                    line=feature_line,
+                    detail="Feature carries no @origin provenance tag",
+                )
+            )
+
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
         return self.validate_text(text, file=path)
