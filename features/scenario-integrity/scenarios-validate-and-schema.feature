@@ -44,3 +44,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending feature and the rule code E_MULTI_BC
+
+  @scenario_hash:22e0098ac4b9a950 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A feature whose @bc value is not a known context is rejected with E_UNKNOWN_BC
+    Given a scenario file whose Feature carries a @bc value that is absent from the bc-manifest.yaml bcs list and is not the lead product token
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending @bc value and the rule code E_UNKNOWN_BC

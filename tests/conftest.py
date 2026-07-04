@@ -2261,3 +2261,43 @@ def given_feature_two_bc(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=text)
     )
+
+
+# -- E_UNKNOWN_BC (scenario 3) ------------------------------------------
+
+
+_UNKNOWN_BC_VALUE = "shopsystem-notabc"
+
+
+@given(
+    "a scenario file whose Feature carries a @bc value that is absent from the "
+    "bc-manifest.yaml bcs list and is not the lead product token"
+)
+def given_feature_unknown_bc(context: dict, tmp_path) -> None:
+    # Exactly one @bc, but its value is neither in the fixture manifest's bcs
+    # list nor the product/unassigned protocol tokens. @origin is valid, so the
+    # sole defect is the unknown owner value.
+    assert _UNKNOWN_BC_VALUE not in _FIXTURE_MANIFEST["bcs"]
+    text = build_feature_text(
+        feature_tags=(f"@bc:{_UNKNOWN_BC_VALUE}", "@origin:adr-056")
+    )
+    context["offending_bc_value"] = _UNKNOWN_BC_VALUE
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
+
+
+@then(
+    parsers.parse(
+        "the diagnostic names the offending @bc value and the rule code {rule_code}"
+    )
+)
+def then_diagnostic_names_bc_value_and_rule(context: dict, rule_code: str) -> None:
+    stderr = context.get("cli_stderr", "")
+    value = context["offending_bc_value"]
+    assert rule_code in stderr, (
+        f"expected rule code {rule_code!r} in diagnostic; got:\n{stderr}"
+    )
+    assert value in stderr, (
+        f"expected offending @bc value {value!r} named in diagnostic; got:\n{stderr}"
+    )
