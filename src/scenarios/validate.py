@@ -37,6 +37,7 @@ from gherkin.parser import Parser
 from gherkin.token_scanner import TokenScanner
 
 from scenarios.hash import compute_scenario_hash
+from scenarios.outstanding import _iter_scenario_blocks, compute_block_only_hash
 
 # ----------------------------------------------------------------------------
 # Stable rule codes.
@@ -494,8 +495,13 @@ class Validator:
         # Exactly one Feature and the file parses. Now the tag-dimension rules
         # (slice 1b) run on the parsed GherkinDocument, ACCRETING every
         # violation they find (they do not early-return) so a file with several
-        # independent defects reports them all in one run.
-        self._check_tags(document, result)
+        # independent defects reports them all in one run. The raw ``text`` is
+        # threaded through so the per-scenario hash recompute can hash each
+        # scenario's RAW block (Examples table retained, keyword preserved) via
+        # the SAME block-extraction/canonicalization path ``scenarios hash``
+        # uses — guaranteeing recompute == ``scenarios hash`` on the raw block
+        # for both ``Scenario`` and ``Scenario Outline`` (lead-vzxd.7 defect A).
+        self._check_tags(document, result, text=text)
         return result
 
     def _feature_is_bc_internal(self, document: dict) -> bool:
@@ -522,7 +528,9 @@ class Validator:
         prefix = f"@{dimension}:"
         return [t[len(prefix):] for t in tag_names if t.startswith(prefix)]
 
-    def _check_tags(self, document: dict, result: ValidationResult) -> None:
+    def _check_tags(
+        self, document: dict, result: ValidationResult, *, text: str = ""
+    ) -> None:
         feature = document.get("feature")
         if feature is None:
             return
@@ -623,24 +631,51 @@ class Validator:
                 )
 
         # -- @scenario_hash: per-scenario, present -------------------------
-        for child in feature.get("children", []):
-            scenario = child.get("scenario")
-            if scenario is None:
-                continue
-            self._check_scenario_hash(scenario, result)
+        # Extract each scenario's RAW block from the file text via the SAME
+        # block-extraction path ``scenarios hash`` uses (``_iter_scenario_blocks``
+        # opens on ``Scenario:``/``Scenario Outline:`` and runs to the next
+        # boundary, so a Scenario Outline's Examples table is part of its block).
+        # The raw blocks come in file order and pair positionally with the
+        # parser's scenario children (also file order; a Background is neither a
+        # raw block nor a scenario child, so the two sequences stay aligned).
+        raw_blocks = list(_iter_scenario_blocks(text)) if text else []
+        scenario_children = [
+            child["scenario"]
+            for child in feature.get("children", [])
+            if child.get("scenario") is not None
+        ]
+        for index, scenario in enumerate(scenario_children):
+            raw_block = raw_blocks[index] if index < len(raw_blocks) else None
+            self._check_scenario_hash(scenario, result, raw_block=raw_block)
 
     @staticmethod
     def _reconstruct_block(scenario: dict) -> str:
-        """The block-only body of a parsed scenario: ``Scenario: <name>`` plus
-        one ``<keyword> <text>`` line per step. This is the parser-path input
-        to ``compute_scenario_hash`` — the same canonical form the block-only
-        hash is defined over."""
-        lines = [f"Scenario: {scenario['name']}"]
+        """The block-only body of a parsed scenario reconstructed from the
+        parser node: the scenario keyword line plus one ``<keyword> <text>``
+        line per step. This is a FALLBACK used only when the raw file text is
+        unavailable to the per-scenario hash check; the primary path hashes the
+        scenario's RAW block (via ``compute_block_only_hash``), which is what
+        ``scenarios hash`` does.
+
+        This fallback preserves the parsed scenario's own keyword
+        (``Scenario`` vs ``Scenario Outline``) rather than normalizing it, so
+        that even without the raw text it does not silently disagree with the
+        canonical hash on the keyword. It still cannot reproduce a Scenario
+        Outline's Examples table (the parser node does not carry it verbatim),
+        which is exactly why the raw-block path is the primary one."""
+        keyword = (scenario.get("keyword") or "Scenario").strip()
+        lines = [f"{keyword}: {scenario['name']}"]
         for step in scenario.get("steps", []):
             lines.append(f"{step['keyword'].strip()} {step['text']}")
         return "\n".join(lines)
 
-    def _check_scenario_hash(self, scenario: dict, result: ValidationResult) -> None:
+    def _check_scenario_hash(
+        self,
+        scenario: dict,
+        result: ValidationResult,
+        *,
+        raw_block: Optional[str] = None,
+    ) -> None:
         scenario_tags = self._tag_names(scenario)
         title = scenario.get("name")
         line = scenario.get("location", {}).get("line")
@@ -659,10 +694,20 @@ class Validator:
             return
 
         # Compare the embedded hash against the block-only hash recomputed over
-        # the scenario's parser-path body. On mismatch the diagnostic names the
-        # scenario together with BOTH the embedded and the recomputed hash.
+        # the scenario's RAW block — the SAME value ``scenarios hash`` produces
+        # on that block. Hashing the raw block via ``compute_block_only_hash``
+        # RETAINS a Scenario Outline's Examples table and preserves the
+        # ``Scenario Outline`` keyword, so the recompute EQUALS ``scenarios
+        # hash`` on the raw block for both ``Scenario`` and ``Scenario Outline``
+        # (lead-vzxd.7 defect A). When no raw block is available (a caller that
+        # did not thread the file text), fall back to the parser-node
+        # reconstruction. On mismatch the diagnostic names the scenario together
+        # with BOTH the embedded and the recomputed hash.
         embedded = hash_values[0]
-        recomputed = compute_scenario_hash(self._reconstruct_block(scenario))
+        if raw_block is not None:
+            recomputed = compute_block_only_hash(raw_block)
+        else:
+            recomputed = compute_scenario_hash(self._reconstruct_block(scenario))
         if embedded != recomputed:
             result.add(
                 Violation(
