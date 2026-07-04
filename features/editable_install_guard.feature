@@ -1,3 +1,4 @@
+@bc_internal
 Feature: shopsystem-scenarios — conftest editable-install guard
 
   @scenario_hash:1db84538be1f0878 @bc:shopsystem-scenarios

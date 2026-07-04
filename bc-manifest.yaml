@@ -23,6 +23,10 @@ bcs:
     role: bc
   - name: shopsystem-bc-launcher
     role: bc
+  - name: shopsystem-test-harness
+    role: bc
+  - name: shopsystem-devcontainer
+    role: bc
 
 services:
   - name: postgres

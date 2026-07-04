@@ -1,3 +1,4 @@
+@bc:shopsystem-scenarios @origin:brief-009
 Feature: scenarios journal-query CLI answers a definite yes/no keyed on the block-only canonical hash
 
   The scenarios journal-query CLI answers whether a block-only canonical hash
@@ -6,7 +7,7 @@ Feature: scenarios journal-query CLI answers a definite yes/no keyed on the bloc
   canonical hash — not on any bead id, scenario title, dispatch record, or
   message-bus row.
 
-  @scenario_hash:2f98b0bb8380af42 @bc:shopsystem-scenarios
+  @scenario_hash:2f98b0bb8380af42
   Scenario: the scenarios journal-query CLI answers a definite yes for a block-only hash present in the journal file
     Given a scenario journal stored as a file on disk under the shopsystem-scenarios bounded context
     And the journal file records the block-only canonical hash "h1" as a present entry
@@ -14,7 +15,7 @@ Feature: scenarios journal-query CLI answers a definite yes/no keyed on the bloc
     Then the command exits with a success status and reports a definite "yes" for "h1"
     And the answer is keyed solely on the block-only canonical hash "h1", not on any bead id, scenario title, dispatch record, or message-bus row
 
-  @scenario_hash:cc4c8fcd07b5587c @bc:shopsystem-scenarios
+  @scenario_hash:cc4c8fcd07b5587c
   Scenario: the scenarios journal-query CLI answers a definite no for a block-only hash absent from the journal file
     Given a scenario journal stored as a file on disk under the shopsystem-scenarios bounded context
     And the journal file contains no entry for the block-only canonical hash "h2"

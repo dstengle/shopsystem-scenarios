@@ -1,6 +1,7 @@
+@bc:shopsystem-scenarios @origin:lead-xn9
 Feature: shopsystem-scenarios — canonicalization and CLI contracts
 
-  @scenario_hash:4bd36d9830ee88b2 @bc:shopsystem-scenarios
+  @scenario_hash:8a5341da355cc6ee
   Scenario: scenarios hash emits a 16-character hex hash for a well-formed scenario body
   Given a Gherkin scenario body on stdin
   When I run "scenarios hash"
