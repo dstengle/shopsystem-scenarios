@@ -61,12 +61,29 @@ E_MISSING_HASH = "E_MISSING_HASH"
 E_HASH_MISMATCH = "E_HASH_MISMATCH"
 E_UNKNOWN_SERVICE = "E_UNKNOWN_SERVICE"
 
+# Slice 2 — aggregate-level transitional markers (ADR-056 D8). These are NOT
+# per-file E_ error codes: @bc:unassigned and @origin:unresolved are LEGAL
+# per-file placeholder values (they do not trip E_UNKNOWN_BC / E_UNKNOWN_ORIGIN
+# at the per-file level). They are TRANSITIONAL forcing markers surfaced ONLY by
+# the --aggregate system-consistency gate, which stays RED until every such
+# placeholder has been resolved to a real owner / provenance. Hence the W_
+# (warning/marker) prefix, distinct from the per-file E_ codes.
+W_BC_UNASSIGNED = "W_BC_UNASSIGNED"
+W_ORIGIN_UNRESOLVED = "W_ORIGIN_UNRESOLVED"
+
 # Protocol @bc tokens that are legal owners but are NOT Bounded Contexts, so
 # they live in code rather than in the bc-manifest.yaml bcs registry (ADR-056
 # D10): the lead product token and the unassigned sentinel.
 PRODUCT_TOKEN = "shopsystem-product"
 UNASSIGNED_TOKEN = "unassigned"
 _EXTRA_LEGAL_BCS = frozenset({PRODUCT_TOKEN, UNASSIGNED_TOKEN})
+
+# The @origin placeholder sentinel that is LEGAL per-file (it resolves without a
+# file lookup, like a lead bead id) but is a TRANSITIONAL marker the aggregate
+# gate surfaces as W_ORIGIN_UNRESOLVED. Mirrors UNASSIGNED_TOKEN on the @bc
+# side: a valid placeholder per-file (ADR-056 D1/D10) that the system-consistency
+# gate nonetheless forces to zero.
+ORIGIN_UNRESOLVED_TOKEN = "unresolved"
 
 # A ref naming a lead bead id (e.g. ``lead-vzxd.1``) is accepted as a legal
 # @origin without a file lookup — the provenance points at a tracked bead
@@ -273,8 +290,16 @@ class Validator:
 
         A ref resolves when a file named ``<ref>.md`` (or ``<ref>``) exists
         under any configured origin root (adr/ pdr/ briefs/), OR when it is
-        shaped like a lead bead id. Otherwise the @origin is unknown.
+        shaped like a lead bead id, OR when it is the ``unresolved`` placeholder
+        sentinel. Otherwise the @origin is unknown.
         """
+        # The ``unresolved`` placeholder is a LEGAL per-file @origin value: it
+        # stands for provenance that has not yet been assigned (ADR-056 D1/D10),
+        # so it must NOT trip E_UNKNOWN_ORIGIN at the per-file level. The
+        # --aggregate gate is what surfaces it (as W_ORIGIN_UNRESOLVED) and forces
+        # it to zero; the per-file check treats it as resolving.
+        if ref == ORIGIN_UNRESOLVED_TOKEN:
+            return True
         # An origin root may be named either as a decision-record directory
         # itself (the ``adr``/``pdr``/``briefs`` default model) or as a parent
         # dir that CONTAINS those subdirs. Search both shapes: the root
@@ -542,3 +567,141 @@ class Validator:
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
         return self.validate_text(text, file=path)
+
+
+# ----------------------------------------------------------------------------
+# Slice 2 — the --aggregate system-consistency gate (ADR-056 D8).
+#
+# Where ``Validator`` decides whether a SINGLE file is schema-valid, the
+# aggregate gate decides whether a whole CORPUS is system-consistent. It stays
+# RED while ANY of:
+#   - any file carries a per-file schema violation (reusing ``Validator``), OR
+#   - any Feature carries the @bc:unassigned transitional marker
+#     (surfaced as W_BC_UNASSIGNED), OR
+#   - any Feature carries the @origin:unresolved transitional marker
+#     (surfaced as W_ORIGIN_UNRESOLVED).
+# It is GREEN (exit 0) ONLY when every file is schema-valid AND zero
+# transitional markers remain.
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class AggregateFinding:
+    """One aggregate-level finding: a marker/code plus the file that carries it.
+
+    ``code`` is a stable string — either a per-file rule code (E_*) surfaced by
+    the reused per-file Validator, or one of the transitional aggregate markers
+    (W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED). ``file`` names the offending file so
+    a reader can locate it; ``detail`` carries an optional human note.
+    """
+
+    code: str
+    file: str
+    detail: Optional[str] = None
+
+    def render(self) -> str:
+        msg = f"{self.file}: {self.code}"
+        if self.detail:
+            msg = f"{msg}: {self.detail}"
+        return msg
+
+
+@dataclass
+class AggregateResult:
+    """The outcome of the aggregate gate over a corpus of scenario files.
+
+    ``findings`` collects every per-file violation code and transitional marker
+    across the corpus. ``ok`` is True iff the corpus is fully consistent (no
+    findings); ``exit_code`` is 0 iff ok.
+    """
+
+    findings: List[AggregateFinding] = field(default_factory=list)
+
+    def add(self, finding: AggregateFinding) -> None:
+        self.findings.append(finding)
+
+    @property
+    def ok(self) -> bool:
+        return not self.findings
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.ok else 1
+
+    def render(self) -> str:
+        return "\n".join(f.render() for f in self.findings)
+
+
+# The glob the aggregate gate harvests corpus files by. A corpus is a directory
+# tree of ``.feature`` files; the walk is recursive so a nested corpus layout is
+# gated as one whole.
+_FEATURE_GLOB = "*.feature"
+
+
+def validate_corpus(
+    corpus_dir: str,
+    *,
+    manifest_path: Optional[str] = None,
+    origin_roots: Optional[List[str]] = None,
+) -> AggregateResult:
+    """Run the aggregate system-consistency gate over a corpus directory.
+
+    Every ``.feature`` file under ``corpus_dir`` (recursively) is run through
+    the per-file ``Validator`` (so a per-file schema violation keeps the gate
+    RED and is reported with its stable E_ code and file), AND scanned for the
+    two transitional markers (@bc:unassigned / @origin:unresolved), which are
+    legal per-file placeholders but keep the aggregate gate RED as
+    W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED. The corpus is gated GREEN (exit 0)
+    only when it is entirely free of both per-file violations and transitional
+    markers.
+    """
+    result = AggregateResult()
+    # Deterministic order so the diagnostic is reproducible run-to-run.
+    files = sorted(Path(corpus_dir).rglob(_FEATURE_GLOB))
+    for path in files:
+        file_str = str(path)
+        validator = Validator(
+            manifest_path=manifest_path,
+            origin_roots=list(origin_roots) if origin_roots is not None else None,
+        )
+        file_result = validator.validate_file(file_str)
+
+        # Per-file schema violations keep the gate RED and are surfaced with
+        # their stable rule code and the offending file.
+        for violation in file_result.violations:
+            result.add(
+                AggregateFinding(
+                    code=violation.rule,
+                    file=file_str,
+                    detail=violation.detail,
+                )
+            )
+
+        # Transitional markers: @bc:unassigned / @origin:unresolved are LEGAL
+        # per-file placeholders (they produced no violation above) but keep the
+        # aggregate gate RED. The per-file Validator captured the sole @bc /
+        # @origin value on the result during tag resolution, so reuse those
+        # rather than re-parsing.
+        if file_result.feature_bc == UNASSIGNED_TOKEN:
+            result.add(
+                AggregateFinding(
+                    code=W_BC_UNASSIGNED,
+                    file=file_str,
+                    detail=(
+                        "Feature carries the @bc:unassigned transitional marker "
+                        "(owner not yet assigned)"
+                    ),
+                )
+            )
+        if file_result.feature_origin == ORIGIN_UNRESOLVED_TOKEN:
+            result.add(
+                AggregateFinding(
+                    code=W_ORIGIN_UNRESOLVED,
+                    file=file_str,
+                    detail=(
+                        "Feature carries the @origin:unresolved transitional "
+                        "marker (provenance not yet resolved)"
+                    ),
+                )
+            )
+    return result

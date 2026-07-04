@@ -62,7 +62,7 @@ from scenarios.journal import (
     is_recorded,
     write_journal_entries,
 )
-from scenarios.validate import Validator
+from scenarios.validate import Validator, validate_corpus
 
 
 def _read_scenario_stdin(command: str) -> str | None:
@@ -176,6 +176,16 @@ def _cmd_journal_rebuild(args: argparse.Namespace) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
+    # --aggregate switches the positional FILE arg to a CORPUS DIRECTORY and
+    # runs the system-consistency gate (ADR-056 D8) over every .feature file
+    # under it: the gate stays non-zero while ANY file is non-conformant (a
+    # per-file schema violation, reusing the per-file Validator) OR ANY Feature
+    # carries a transitional marker (@bc:unassigned -> W_BC_UNASSIGNED,
+    # @origin:unresolved -> W_ORIGIN_UNRESOLVED), and exits 0 only when the
+    # corpus is entirely clean of both.
+    if args.aggregate:
+        return _cmd_validate_aggregate(args)
+
     # Validate one scenario file against the ADR-056 schema. Resolution roots
     # (--manifest / --origin-root) are injectable so slice 1b's @bc/@origin
     # legal-set lookups plug in without a CLI refactor; this foundation slice
@@ -196,6 +206,22 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             print(json.dumps(result.to_json_diagnostic()))
         else:
             print(result.render(), file=sys.stderr)
+    return result.exit_code
+
+
+def _cmd_validate_aggregate(args: argparse.Namespace) -> int:
+    # Run the aggregate system-consistency gate over the corpus directory named
+    # by the positional arg. Exit code is 0 iff the corpus is entirely free of
+    # per-file schema violations AND transitional markers; otherwise non-zero,
+    # with each finding (a per-file E_ code or a transitional W_ marker) printed
+    # to stderr naming the offending file.
+    result = validate_corpus(
+        args.file,
+        manifest_path=args.manifest,
+        origin_roots=args.origin_root or None,
+    )
+    if not result.ok:
+        print(result.render(), file=sys.stderr)
     return result.exit_code
 
 
@@ -339,6 +365,18 @@ def build_parser() -> argparse.ArgumentParser:
             "(file / line / scenario_title / scenario_hash / bc / origin plus a "
             "violations array of stable rule codes) instead of the human "
             "diagnostic on stderr"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--aggregate",
+        action="store_true",
+        help=(
+            "treat the positional argument as a CORPUS DIRECTORY and run the "
+            "system-consistency gate (ADR-056 D8) over every .feature file under "
+            "it: exit non-zero while any file is non-conformant (a per-file "
+            "schema violation) or any Feature carries a transitional marker "
+            "(@bc:unassigned -> W_BC_UNASSIGNED, @origin:unresolved -> "
+            "W_ORIGIN_UNRESOLVED); exit 0 only when the corpus is entirely clean"
         ),
     )
     validate_cmd.set_defaults(func=_cmd_validate)
