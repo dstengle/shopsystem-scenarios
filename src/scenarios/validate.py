@@ -128,6 +128,12 @@ class ValidationResult:
 
     file: Optional[str] = None
     violations: List[Violation] = field(default_factory=list)
+    # Feature-level @bc / @origin values captured during tag resolution, so the
+    # --json diagnostic can name the owning context and provenance even when the
+    # violation itself did not populate those fields (e.g. an E_MISSING_HASH
+    # violation carries a scenario_title but no bc/origin).
+    feature_bc: Optional[str] = None
+    feature_origin: Optional[str] = None
 
     def add(self, violation: Violation) -> None:
         if violation.file is None:
@@ -144,6 +150,43 @@ class ValidationResult:
 
     def render(self) -> str:
         return "\n".join(v.render() for v in self.violations)
+
+    def to_json_diagnostic(self) -> dict:
+        """A machine-readable diagnostic object for the ``--json`` output.
+
+        The object names the offending ``file`` together with the diagnostic
+        context a downstream reader needs to locate the defect —
+        ``line``, ``scenario_title``, ``scenario_hash``, ``bc``, ``origin`` —
+        and a ``violations`` array of the stable rule-code strings that fired.
+
+        Each scalar field is sourced from the first violation that populated it
+        (a per-scenario rule supplies ``scenario_title``/``line``; a hash rule
+        supplies ``scenario_hash``; an @bc/@origin rule supplies ``bc``/
+        ``origin``), falling back to the feature-level @bc/@origin captured
+        during tag resolution. This keeps the object's named fields honestly
+        populated regardless of which single rule fired.
+        """
+
+        def _first(attr: str) -> Optional[object]:
+            for v in self.violations:
+                value = getattr(v, attr)
+                if value is not None:
+                    return value
+            return None
+
+        return {
+            "file": self.file,
+            "line": _first("line"),
+            "scenario_title": _first("scenario_title"),
+            "scenario_hash": _first("scenario_hash"),
+            "bc": _first("bc") if _first("bc") is not None else self.feature_bc,
+            "origin": (
+                _first("origin")
+                if _first("origin") is not None
+                else self.feature_origin
+            ),
+            "violations": [v.rule for v in self.violations],
+        }
 
 
 # Conventional default locations the resolution roots fall back to when a CLI
@@ -371,6 +414,10 @@ class Validator:
             )
         else:
             (bc_value,) = bc_values
+            # Capture the feature-level owner so the --json diagnostic can name
+            # the owning context even when the firing violation is not itself an
+            # @bc rule (e.g. an E_MISSING_HASH per-scenario violation).
+            result.feature_bc = bc_value
             if bc_value not in self.legal_bcs:
                 result.add(
                     Violation(
@@ -404,6 +451,9 @@ class Validator:
             )
         else:
             (origin_value,) = origin_values
+            # Capture the feature-level provenance for the --json diagnostic,
+            # for the same reason feature_bc is captured above.
+            result.feature_origin = origin_value
             if not self._origin_resolves(origin_value):
                 result.add(
                     Violation(

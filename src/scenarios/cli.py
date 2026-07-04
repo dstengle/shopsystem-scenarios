@@ -39,16 +39,20 @@ Subcommands:
         them to JOURNAL-FILE in the journal format (one block-only canonical
         hash per line). Idempotent: re-running over the same tree leaves an
         identical entry set hash-for-hash.
-    validate FILE [--manifest PATH] [--origin-root DIR ...]
+    validate FILE [--manifest PATH] [--origin-root DIR ...] [--json]
         Validates a scenario (.feature) FILE against the ADR-056 schema.
         Collects a list of violations; exits 0 iff none, non-zero otherwise
         (each violation printed to stderr naming the file and its stable rule
         code). --manifest / --origin-root inject the @bc/@origin resolution
-        roots (defaulting to conventional repo locations).
+        roots (defaulting to conventional repo locations). --json emits, on a
+        violation, a machine-readable JSON diagnostic to stdout (file / line /
+        scenario_title / scenario_hash / bc / origin plus a violations array of
+        stable rule codes) instead of the human diagnostic on stderr.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from scenarios.feature import iter_scenarios, iter_tags
@@ -184,7 +188,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     )
     result = validator.validate_file(args.file)
     if not result.ok:
-        print(result.render(), file=sys.stderr)
+        if args.json:
+            # Machine-readable diagnostic on STDOUT: a JSON object naming the
+            # offending file, its line / scenario_title / scenario_hash / bc /
+            # origin context, and a violations array of stable rule codes. The
+            # human (non-JSON) diagnostic stays on stderr and is unchanged.
+            print(json.dumps(result.to_json_diagnostic()))
+        else:
+            print(result.render(), file=sys.stderr)
     return result.exit_code
 
 
@@ -318,6 +329,16 @@ def build_parser() -> argparse.ArgumentParser:
             "directory the @origin legal set resolves against (repeatable; "
             "defaults to adr/ pdr/ briefs/; injectable so tests can supply "
             "fixtures)"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "on a violation, emit a machine-readable JSON diagnostic to stdout "
+            "(file / line / scenario_title / scenario_hash / bc / origin plus a "
+            "violations array of stable rule codes) instead of the human "
+            "diagnostic on stderr"
         ),
     )
     validate_cmd.set_defaults(func=_cmd_validate)
