@@ -31,9 +31,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+import yaml
 from gherkin.errors import CompositeParserException, ParserException
 from gherkin.parser import Parser
 from gherkin.token_scanner import TokenScanner
+
+from scenarios.hash import compute_scenario_hash
 
 # ----------------------------------------------------------------------------
 # Stable rule codes.
@@ -46,6 +49,35 @@ from gherkin.token_scanner import TokenScanner
 E_GHERKIN_PARSE = "E_GHERKIN_PARSE"
 E_NO_FEATURE = "E_NO_FEATURE"
 E_MULTI_FEATURE = "E_MULTI_FEATURE"
+
+# Slice 1b — tag-dimension rules.
+E_MISSING_BC = "E_MISSING_BC"
+E_MULTI_BC = "E_MULTI_BC"
+E_UNKNOWN_BC = "E_UNKNOWN_BC"
+E_MISSING_ORIGIN = "E_MISSING_ORIGIN"
+E_MULTI_ORIGIN = "E_MULTI_ORIGIN"
+E_UNKNOWN_ORIGIN = "E_UNKNOWN_ORIGIN"
+E_MISSING_HASH = "E_MISSING_HASH"
+E_HASH_MISMATCH = "E_HASH_MISMATCH"
+E_UNKNOWN_SERVICE = "E_UNKNOWN_SERVICE"
+
+# Protocol @bc tokens that are legal owners but are NOT Bounded Contexts, so
+# they live in code rather than in the bc-manifest.yaml bcs registry (ADR-056
+# D10): the lead product token and the unassigned sentinel.
+PRODUCT_TOKEN = "shopsystem-product"
+UNASSIGNED_TOKEN = "unassigned"
+_EXTRA_LEGAL_BCS = frozenset({PRODUCT_TOKEN, UNASSIGNED_TOKEN})
+
+# A ref naming a lead bead id (e.g. ``lead-vzxd.1``) is accepted as a legal
+# @origin without a file lookup — the provenance points at a tracked bead
+# rather than a decision-record file. Detection is deliberately narrow and
+# pluggable: a ref is treated as a lead bead only when it carries one of these
+# known lead/shop prefixes followed by a bead suffix. A bare decision-record
+# ref like ``adr-056`` does NOT match (it resolves, or fails, on the file
+# path), so this pattern never swallows an unknown-origin case. The
+# file-resolution + genuine-unknown case is what the scenarios pin.
+_LEAD_BEAD_PREFIXES = ("lead-", "shopsystem-")
+_LEAD_BEAD_SUFFIX_RE = re.compile(r"^[a-z0-9]+(\.[0-9]+)*$", re.IGNORECASE)
 
 
 # A Feature keyword at the start of a (stripped) line. Mirrors the line-start
@@ -134,8 +166,9 @@ class Validator:
     - ``origin_roots`` — directories (adr/ pdr/ briefs/) the @origin legal set
       resolves against, alongside lead bead ids.
 
-    This foundation slice does NOT read these roots — the @bc/@origin rules are
-    slice 1b. They are constructor args now purely to fix the seam.
+    Slice 1b reads these roots for its @bc/@origin/@service legal-set lookups;
+    the manifest is loaded lazily on first use so a run that never reaches the
+    tag checks (an un-parseable file) does not require the manifest to exist.
     """
 
     def __init__(
@@ -152,6 +185,63 @@ class Validator:
             if origin_roots is not None
             else list(DEFAULT_ORIGIN_ROOTS)
         )
+        self._legal_bcs: Optional[frozenset] = None
+        self._legal_services: Optional[frozenset] = None
+
+    # -- manifest-backed legal sets -----------------------------------------
+
+    def _load_manifest(self) -> None:
+        """Load the bc-manifest.yaml bcs/services lists (once, lazily).
+
+        Legal @bc = the manifest's ``bcs`` list PLUS the protocol tokens
+        (product / unassigned). Legal @service = the manifest's ``services``
+        list. A missing manifest yields empty registries (the tokens still
+        stand for @bc) rather than crashing the run.
+        """
+        if self._legal_bcs is not None:
+            return
+        data: dict = {}
+        path = Path(self.manifest_path)
+        if path.exists():
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        bcs = data.get("bcs") or []
+        services = data.get("services") or []
+        self._legal_bcs = frozenset(bcs) | _EXTRA_LEGAL_BCS
+        self._legal_services = frozenset(services)
+
+    @property
+    def legal_bcs(self) -> frozenset:
+        self._load_manifest()
+        assert self._legal_bcs is not None
+        return self._legal_bcs
+
+    @property
+    def legal_services(self) -> frozenset:
+        self._load_manifest()
+        assert self._legal_services is not None
+        return self._legal_services
+
+    # -- origin resolution --------------------------------------------------
+
+    def _origin_resolves(self, ref: str) -> bool:
+        """True iff ``ref`` names a known decision record or a lead bead id.
+
+        A ref resolves when a file named ``<ref>.md`` (or ``<ref>``) exists
+        under any configured origin root (adr/ pdr/ briefs/), OR when it is
+        shaped like a lead bead id. Otherwise the @origin is unknown.
+        """
+        for root in self.origin_roots:
+            base = Path(root)
+            if (base / f"{ref}.md").exists() or (base / ref).exists():
+                return True
+        for prefix in _LEAD_BEAD_PREFIXES:
+            if ref.startswith(prefix):
+                suffix = ref[len(prefix):]
+                if suffix and _LEAD_BEAD_SUFFIX_RE.match(suffix):
+                    return True
+        return False
 
     # -- parsing -------------------------------------------------------------
 
@@ -217,17 +307,48 @@ class Validator:
         # instead of crashing with a traceback (ADR-056). The parser's first
         # error line is carried as detail for the reader.
         try:
-            self._parse(text)
+            document = self._parse(text)
         except (CompositeParserException, ParserException) as exc:
             first_line = str(exc).splitlines()[0] if str(exc) else None
             result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
             return result
 
-        # Exactly one Feature and the file parses. The @bc/@origin/
-        # @scenario_hash dimension rules (slice 1b) will add their checks here,
-        # collecting further violations before returning. For this foundation
-        # slice a single-Feature parseable file is conformant.
+        # Exactly one Feature and the file parses. Now the tag-dimension rules
+        # (slice 1b) run on the parsed GherkinDocument, ACCRETING every
+        # violation they find (they do not early-return) so a file with several
+        # independent defects reports them all in one run.
+        self._check_tags(document, result)
         return result
+
+    # -- tag-dimension rules (slice 1b) -------------------------------------
+
+    @staticmethod
+    def _tag_names(node: dict) -> List[str]:
+        return [t["name"] for t in node.get("tags", [])]
+
+    @staticmethod
+    def _values_for(tag_names: List[str], dimension: str) -> List[str]:
+        """Extract the values of ``@<dimension>:<value>`` tags, in order."""
+        prefix = f"@{dimension}:"
+        return [t[len(prefix):] for t in tag_names if t.startswith(prefix)]
+
+    def _check_tags(self, document: dict, result: ValidationResult) -> None:
+        feature = document.get("feature")
+        if feature is None:
+            return
+        feature_tags = self._tag_names(feature)
+        feature_line = feature.get("location", {}).get("line")
+
+        # -- @bc: exactly one, naming a known context -----------------------
+        bc_values = self._values_for(feature_tags, "bc")
+        if len(bc_values) == 0:
+            result.add(
+                Violation(
+                    rule=E_MISSING_BC,
+                    line=feature_line,
+                    detail="Feature carries no @bc owner tag",
+                )
+            )
 
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
