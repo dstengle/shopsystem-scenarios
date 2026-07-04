@@ -86,3 +86,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending scenario together with both the embedded and the recomputed hash and the rule code E_HASH_MISMATCH
+
+  @scenario_hash:25a0a6eadb9ad38a @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A conformant feature additionally carrying a known @service tag still passes validation
+    Given a conformant scenario file whose Feature also carries a @service value listed in the bc-manifest.yaml services section
+    When I run "scenarios validate" against the file
+    Then the exit code is 0
+    And the optional @service is accepted without substituting for the mandatory @bc owner

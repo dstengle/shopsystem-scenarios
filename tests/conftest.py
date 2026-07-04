@@ -2451,3 +2451,45 @@ def then_diagnostic_names_scenario_and_both_hashes(
     assert recomputed in stderr, (
         f"expected recomputed hash {recomputed!r} named; got:\n{stderr}"
     )
+
+
+# -- @service accepted (scenario 9) -------------------------------------
+
+
+@given(
+    "a conformant scenario file whose Feature also carries a @service value "
+    "listed in the bc-manifest.yaml services section"
+)
+def given_conformant_with_known_service(context: dict, tmp_path) -> None:
+    # A fully conformant Feature (valid @bc/@origin, auto-hashed scenario) that
+    # ALSO carries a known @service (postgres, in the fixture manifest). The
+    # @service is optional and must not perturb the exit-0 outcome.
+    service = _FIXTURE_MANIFEST["services"][0]
+    text = build_feature_text(
+        feature_tags=(
+            "@bc:shopsystem-scenarios",
+            "@origin:adr-056",
+            f"@service:{service}",
+        )
+    )
+    assert "@service:" in text and "@bc:" in text
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
+
+
+@then(
+    "the optional @service is accepted without substituting for the mandatory "
+    "@bc owner"
+)
+def then_service_accepted_not_substituting(context: dict) -> None:
+    # The run passed (exit 0) with both @service and @bc present, and no
+    # violation naming @service or a missing owner leaked to the diagnostic.
+    assert context.get("cli_returncode") == 0, (
+        f"expected exit 0; got {context.get('cli_returncode')}; "
+        f"stderr:\n{context.get('cli_stderr', '')}"
+    )
+    combined = context.get("cli_stdout", "") + context.get("cli_stderr", "")
+    assert "E_" not in combined, (
+        f"expected no violation with a known @service present; got:\n{combined}"
+    )
