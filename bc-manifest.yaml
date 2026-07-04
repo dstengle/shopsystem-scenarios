@@ -1,0 +1,19 @@
+# bc-manifest.yaml — authoritative legal-value sets for `scenarios validate`
+# (ADR-056 D10). Repo-local so the command works against the real corpus.
+#
+# `bcs` — the Bounded Context owner tokens a Feature's @bc may name. The full
+# legal @bc set is this list PLUS the lead product token (`shopsystem-product`)
+# PLUS the sentinel `unassigned`; those two are protocol tokens, not BCs, and
+# are encoded in the validator rather than here so this file stays a pure BC
+# registry.
+#
+# `services` — the shared-service tokens a Feature's optional @service may name.
+bcs:
+  - shopsystem-messaging
+  - shopsystem-scenarios
+  - shopsystem-templates
+  - shopsystem-bc-launcher
+
+services:
+  - postgres
+  - agent-vault-broker

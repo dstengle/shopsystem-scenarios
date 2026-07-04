@@ -1,0 +1,707 @@
+"""`scenarios validate` — schema validation of Gherkin scenario files (ADR-056).
+
+This module is the FOUNDATION slice (1a) of the validate subsystem. It
+establishes the architecture the later slices depend on:
+
+- A structured ``Violation`` value with a stable ``rule`` code and the fields
+  the later ``--json`` slice needs (file, line, scenario_title, scenario_hash,
+  bc, origin).
+- A ``ValidationResult`` collecting a list of violations; the run's exit code
+  is 0 iff the list is empty.
+- A ``Validator`` whose resolution roots (bc-manifest path, origin-resolution
+  roots) are INJECTABLE via constructor args / CLI flags, so slice 1b's
+  @bc/@origin legal-set lookups plug in without refactoring this seam.
+
+This slice implements only these schema dimensions:
+
+- ``E_GHERKIN_PARSE`` — the file does not parse under off-the-shelf
+  @cucumber/gherkin (gherkin-official).
+- ``E_NO_FEATURE`` — the file declares zero ``Feature:`` keywords.
+- ``E_MULTI_FEATURE`` — the file declares more than one ``Feature:`` keyword.
+- happy path — a fully conformant file yields zero violations (exit 0).
+
+The @bc/@origin/@scenario_hash dimension rules, @service, --json, --aggregate,
+hash-reconcile, and create/consolidate helpers are LATER slices. The violation
+model and Validator structure are designed so they slot in cleanly.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+import yaml
+from gherkin.errors import CompositeParserException, ParserException
+from gherkin.parser import Parser
+from gherkin.token_scanner import TokenScanner
+
+from scenarios.hash import compute_scenario_hash
+
+# ----------------------------------------------------------------------------
+# Stable rule codes.
+#
+# These strings are load-bearing: they appear in diagnostics, in the later
+# --json output, and in this BC's own scenario assertions. Treat them as a
+# stable public vocabulary — later slices ADD codes here, they do not rename
+# these.
+# ----------------------------------------------------------------------------
+E_GHERKIN_PARSE = "E_GHERKIN_PARSE"
+E_NO_FEATURE = "E_NO_FEATURE"
+E_MULTI_FEATURE = "E_MULTI_FEATURE"
+
+# Slice 1b — tag-dimension rules.
+E_MISSING_BC = "E_MISSING_BC"
+E_MULTI_BC = "E_MULTI_BC"
+E_UNKNOWN_BC = "E_UNKNOWN_BC"
+E_MISSING_ORIGIN = "E_MISSING_ORIGIN"
+E_MULTI_ORIGIN = "E_MULTI_ORIGIN"
+E_UNKNOWN_ORIGIN = "E_UNKNOWN_ORIGIN"
+E_MISSING_HASH = "E_MISSING_HASH"
+E_HASH_MISMATCH = "E_HASH_MISMATCH"
+E_UNKNOWN_SERVICE = "E_UNKNOWN_SERVICE"
+
+# Slice 2 — aggregate-level transitional markers (ADR-056 D8). These are NOT
+# per-file E_ error codes: @bc:unassigned and @origin:unresolved are LEGAL
+# per-file placeholder values (they do not trip E_UNKNOWN_BC / E_UNKNOWN_ORIGIN
+# at the per-file level). They are TRANSITIONAL forcing markers surfaced ONLY by
+# the --aggregate system-consistency gate, which stays RED until every such
+# placeholder has been resolved to a real owner / provenance. Hence the W_
+# (warning/marker) prefix, distinct from the per-file E_ codes.
+W_BC_UNASSIGNED = "W_BC_UNASSIGNED"
+W_ORIGIN_UNRESOLVED = "W_ORIGIN_UNRESOLVED"
+
+# Protocol @bc tokens that are legal owners but are NOT Bounded Contexts, so
+# they live in code rather than in the bc-manifest.yaml bcs registry (ADR-056
+# D10): the lead product token and the unassigned sentinel.
+PRODUCT_TOKEN = "shopsystem-product"
+UNASSIGNED_TOKEN = "unassigned"
+_EXTRA_LEGAL_BCS = frozenset({PRODUCT_TOKEN, UNASSIGNED_TOKEN})
+
+# The @origin placeholder sentinel that is LEGAL per-file (it resolves without a
+# file lookup, like a lead bead id) but is a TRANSITIONAL marker the aggregate
+# gate surfaces as W_ORIGIN_UNRESOLVED. Mirrors UNASSIGNED_TOKEN on the @bc
+# side: a valid placeholder per-file (ADR-056 D1/D10) that the system-consistency
+# gate nonetheless forces to zero.
+ORIGIN_UNRESOLVED_TOKEN = "unresolved"
+
+# A ref naming a lead bead id (e.g. ``lead-vzxd.1``) is accepted as a legal
+# @origin without a file lookup — the provenance points at a tracked bead
+# rather than a decision-record file. Detection is deliberately narrow and
+# pluggable: a ref is treated as a lead bead only when it carries one of these
+# known lead/shop prefixes followed by a bead suffix. A bare decision-record
+# ref like ``adr-056`` does NOT match (it resolves, or fails, on the file
+# path), so this pattern never swallows an unknown-origin case. The
+# file-resolution + genuine-unknown case is what the scenarios pin.
+_LEAD_BEAD_PREFIXES = ("lead-", "shopsystem-")
+_LEAD_BEAD_SUFFIX_RE = re.compile(r"^[a-z0-9]+(\.[0-9]+)*$", re.IGNORECASE)
+
+
+# A Feature keyword at the start of a (stripped) line. Mirrors the line-start
+# discipline feature.py uses for Scenario:/tags — a "Feature:" appearing
+# mid-step as substring is not a Feature declaration.
+_FEATURE_LINE_RE = re.compile(r"^\s*Feature:")
+
+
+@dataclass
+class Violation:
+    """One schema violation found in a scenario file.
+
+    ``rule`` is the stable rule code (e.g. ``E_GHERKIN_PARSE``). The remaining
+    fields are the diagnostic context the later ``--json`` slice serializes;
+    they are Optional because not every rule can populate every field (a parse
+    failure, for instance, has no resolvable scenario_title). Foundation-slice
+    rules populate ``file`` and ``rule``; the richer fields are wired here so
+    later slices set them without changing this shape.
+    """
+
+    rule: str
+    file: Optional[str] = None
+    line: Optional[int] = None
+    scenario_title: Optional[str] = None
+    scenario_hash: Optional[str] = None
+    bc: Optional[str] = None
+    origin: Optional[str] = None
+    detail: Optional[str] = None
+
+    def render(self) -> str:
+        """A one-line human diagnostic naming the file and the rule code."""
+        where = self.file or "<input>"
+        if self.line is not None:
+            where = f"{where}:{self.line}"
+        msg = f"{where}: {self.rule}"
+        if self.detail:
+            msg = f"{msg}: {self.detail}"
+        return msg
+
+
+@dataclass
+class ValidationResult:
+    """The outcome of validating one file: the violations collected.
+
+    ``ok`` is True iff no violations were collected; ``exit_code`` is the
+    process exit status a CLI run should surface (0 iff ok).
+    """
+
+    file: Optional[str] = None
+    violations: List[Violation] = field(default_factory=list)
+    # Feature-level @bc / @origin values captured during tag resolution, so the
+    # --json diagnostic can name the owning context and provenance even when the
+    # violation itself did not populate those fields (e.g. an E_MISSING_HASH
+    # violation carries a scenario_title but no bc/origin).
+    feature_bc: Optional[str] = None
+    feature_origin: Optional[str] = None
+
+    def add(self, violation: Violation) -> None:
+        if violation.file is None:
+            violation.file = self.file
+        self.violations.append(violation)
+
+    @property
+    def ok(self) -> bool:
+        return not self.violations
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.ok else 1
+
+    def render(self) -> str:
+        return "\n".join(v.render() for v in self.violations)
+
+    def to_json_diagnostic(self) -> dict:
+        """A machine-readable diagnostic object for the ``--json`` output.
+
+        The object names the offending ``file`` together with the diagnostic
+        context a downstream reader needs to locate the defect —
+        ``line``, ``scenario_title``, ``scenario_hash``, ``bc``, ``origin`` —
+        and a ``violations`` array of the stable rule-code strings that fired.
+
+        Each scalar field is sourced from the first violation that populated it
+        (a per-scenario rule supplies ``scenario_title``/``line``; a hash rule
+        supplies ``scenario_hash``; an @bc/@origin rule supplies ``bc``/
+        ``origin``), falling back to the feature-level @bc/@origin captured
+        during tag resolution. This keeps the object's named fields honestly
+        populated regardless of which single rule fired.
+        """
+
+        def _first(attr: str) -> Optional[object]:
+            for v in self.violations:
+                value = getattr(v, attr)
+                if value is not None:
+                    return value
+            return None
+
+        return {
+            "file": self.file,
+            "line": _first("line"),
+            "scenario_title": _first("scenario_title"),
+            "scenario_hash": _first("scenario_hash"),
+            "bc": _first("bc") if _first("bc") is not None else self.feature_bc,
+            "origin": (
+                _first("origin")
+                if _first("origin") is not None
+                else self.feature_origin
+            ),
+            "violations": [v.rule for v in self.violations],
+        }
+
+
+# Conventional default locations the resolution roots fall back to when a CLI
+# run does not override them. These files/dirs do NOT exist in this repo yet
+# (slice 1b introduces the @bc/@origin resolution that reads them); the seam is
+# built now so slice 1b plugs in without touching the constructor signature.
+DEFAULT_MANIFEST_PATH = "bc-manifest.yaml"
+DEFAULT_ORIGIN_ROOTS = ("adr", "pdr", "briefs")
+
+
+class Validator:
+    """Validates a scenario file against the ADR-056 schema.
+
+    Resolution roots are injectable so tests can supply fixtures and slice 1b's
+    @bc/@origin legal-set lookups can resolve against a manifest / origin roots
+    without a refactor:
+
+    - ``manifest_path`` — path to the ``bc-manifest.yaml`` (``bcs:``/
+      ``services:`` sections) the @bc/@service legal set resolves against.
+    - ``origin_roots`` — directories (adr/ pdr/ briefs/) the @origin legal set
+      resolves against, alongside lead bead ids.
+
+    Slice 1b reads these roots for its @bc/@origin/@service legal-set lookups;
+    the manifest is loaded lazily on first use so a run that never reaches the
+    tag checks (an un-parseable file) does not require the manifest to exist.
+    """
+
+    def __init__(
+        self,
+        *,
+        manifest_path: Optional[str] = None,
+        origin_roots: Optional[List[str]] = None,
+    ) -> None:
+        self.manifest_path = (
+            manifest_path if manifest_path is not None else DEFAULT_MANIFEST_PATH
+        )
+        self.origin_roots = (
+            list(origin_roots)
+            if origin_roots is not None
+            else list(DEFAULT_ORIGIN_ROOTS)
+        )
+        self._legal_bcs: Optional[frozenset] = None
+        self._legal_services: Optional[frozenset] = None
+
+    # -- manifest-backed legal sets -----------------------------------------
+
+    def _load_manifest(self) -> None:
+        """Load the bc-manifest.yaml bcs/services lists (once, lazily).
+
+        Legal @bc = the manifest's ``bcs`` list PLUS the protocol tokens
+        (product / unassigned). Legal @service = the manifest's ``services``
+        list. A missing manifest yields empty registries (the tokens still
+        stand for @bc) rather than crashing the run.
+        """
+        if self._legal_bcs is not None:
+            return
+        data: dict = {}
+        path = Path(self.manifest_path)
+        if path.exists():
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        bcs = data.get("bcs") or []
+        services = data.get("services") or []
+        self._legal_bcs = frozenset(bcs) | _EXTRA_LEGAL_BCS
+        self._legal_services = frozenset(services)
+
+    @property
+    def legal_bcs(self) -> frozenset:
+        self._load_manifest()
+        assert self._legal_bcs is not None
+        return self._legal_bcs
+
+    @property
+    def legal_services(self) -> frozenset:
+        self._load_manifest()
+        assert self._legal_services is not None
+        return self._legal_services
+
+    # -- origin resolution --------------------------------------------------
+
+    def _origin_resolves(self, ref: str) -> bool:
+        """True iff ``ref`` names a known decision record or a lead bead id.
+
+        A ref resolves when a file named ``<ref>.md`` (or ``<ref>``) exists
+        under any configured origin root (adr/ pdr/ briefs/), OR when it is
+        shaped like a lead bead id, OR when it is the ``unresolved`` placeholder
+        sentinel. Otherwise the @origin is unknown.
+        """
+        # The ``unresolved`` placeholder is a LEGAL per-file @origin value: it
+        # stands for provenance that has not yet been assigned (ADR-056 D1/D10),
+        # so it must NOT trip E_UNKNOWN_ORIGIN at the per-file level. The
+        # --aggregate gate is what surfaces it (as W_ORIGIN_UNRESOLVED) and forces
+        # it to zero; the per-file check treats it as resolving.
+        if ref == ORIGIN_UNRESOLVED_TOKEN:
+            return True
+        # An origin root may be named either as a decision-record directory
+        # itself (the ``adr``/``pdr``/``briefs`` default model) or as a parent
+        # dir that CONTAINS those subdirs. Search both shapes: the root
+        # directly, and each of its adr/pdr/briefs subdirs.
+        search_dirs: List[Path] = []
+        for root in self.origin_roots:
+            base = Path(root)
+            search_dirs.append(base)
+            for sub in ("adr", "pdr", "briefs"):
+                search_dirs.append(base / sub)
+        for base in search_dirs:
+            if (base / f"{ref}.md").exists() or (base / ref).exists():
+                return True
+        for prefix in _LEAD_BEAD_PREFIXES:
+            if ref.startswith(prefix):
+                suffix = ref[len(prefix):]
+                if suffix and _LEAD_BEAD_SUFFIX_RE.match(suffix):
+                    return True
+        return False
+
+    # -- parsing -------------------------------------------------------------
+
+    @staticmethod
+    def _count_feature_lines(text: str) -> int:
+        return sum(1 for line in text.splitlines() if _FEATURE_LINE_RE.match(line))
+
+    @staticmethod
+    def _parse(text: str):
+        """Parse ``text`` with off-the-shelf gherkin-official.
+
+        Returns the parsed GherkinDocument dict on success, or raises the
+        parser's own exception on failure — the caller maps that to a
+        violation so the CLI never crashes on bad input.
+        """
+        return Parser().parse(TokenScanner(text))
+
+    # -- validation ----------------------------------------------------------
+
+    def validate_text(
+        self, text: str, *, file: Optional[str] = None
+    ) -> ValidationResult:
+        result = ValidationResult(file=file)
+
+        # Feature cardinality is decided by a line scan BEFORE trusting the
+        # parser, because off-the-shelf strict Gherkin raises on both zero
+        # Feature (a Scenario with no enclosing Feature) and a second Feature.
+        # A raw parse error would collapse both distinct schema violations
+        # (E_NO_FEATURE, E_MULTI_FEATURE) into E_GHERKIN_PARSE and lose the
+        # distinction the schema requires. The line scan recovers the intended
+        # cardinality diagnostic; a single-Feature file then goes to the parser
+        # for the genuine E_GHERKIN_PARSE path.
+        # Feature cardinality is decided by a line scan BEFORE trusting the
+        # parser. Off-the-shelf strict Gherkin raises on a file with scenarios
+        # but no enclosing Feature, which would collapse the intended
+        # E_NO_FEATURE diagnostic into a generic E_GHERKIN_PARSE. The line scan
+        # recovers the schema-level cardinality diagnostic; a single-Feature
+        # file still goes to the parser below for the genuine parse path.
+        feature_count = self._count_feature_lines(text)
+        if feature_count == 0:
+            result.add(
+                Violation(
+                    rule=E_NO_FEATURE,
+                    detail="file declares no Feature keyword",
+                )
+            )
+            return result
+        if feature_count > 1:
+            result.add(
+                Violation(
+                    rule=E_MULTI_FEATURE,
+                    detail=(
+                        f"file declares {feature_count} Feature keywords "
+                        "(expected exactly one)"
+                    ),
+                )
+            )
+            return result
+
+        # Off-the-shelf gherkin-official raises CompositeParserException (or a
+        # bare ParserException) on un-parseable input. Catch it and map it to a
+        # single E_GHERKIN_PARSE violation so the CLI reports a clean diagnostic
+        # instead of crashing with a traceback (ADR-056). The parser's first
+        # error line is carried as detail for the reader.
+        try:
+            document = self._parse(text)
+        except (CompositeParserException, ParserException) as exc:
+            first_line = str(exc).splitlines()[0] if str(exc) else None
+            result.add(Violation(rule=E_GHERKIN_PARSE, detail=first_line))
+            return result
+
+        # Exactly one Feature and the file parses. Now the tag-dimension rules
+        # (slice 1b) run on the parsed GherkinDocument, ACCRETING every
+        # violation they find (they do not early-return) so a file with several
+        # independent defects reports them all in one run.
+        self._check_tags(document, result)
+        return result
+
+    # -- tag-dimension rules (slice 1b) -------------------------------------
+
+    @staticmethod
+    def _tag_names(node: dict) -> List[str]:
+        return [t["name"] for t in node.get("tags", [])]
+
+    @staticmethod
+    def _values_for(tag_names: List[str], dimension: str) -> List[str]:
+        """Extract the values of ``@<dimension>:<value>`` tags, in order."""
+        prefix = f"@{dimension}:"
+        return [t[len(prefix):] for t in tag_names if t.startswith(prefix)]
+
+    def _check_tags(self, document: dict, result: ValidationResult) -> None:
+        feature = document.get("feature")
+        if feature is None:
+            return
+        feature_tags = self._tag_names(feature)
+        feature_line = feature.get("location", {}).get("line")
+
+        # -- @bc: exactly one, naming a known context -----------------------
+        bc_values = self._values_for(feature_tags, "bc")
+        if len(bc_values) == 0:
+            result.add(
+                Violation(
+                    rule=E_MISSING_BC,
+                    line=feature_line,
+                    detail="Feature carries no @bc owner tag",
+                )
+            )
+        elif len(bc_values) > 1:
+            result.add(
+                Violation(
+                    rule=E_MULTI_BC,
+                    line=feature_line,
+                    detail=(
+                        f"Feature carries {len(bc_values)} @bc tags "
+                        "(expected exactly one)"
+                    ),
+                )
+            )
+        else:
+            (bc_value,) = bc_values
+            # Capture the feature-level owner so the --json diagnostic can name
+            # the owning context even when the firing violation is not itself an
+            # @bc rule (e.g. an E_MISSING_HASH per-scenario violation).
+            result.feature_bc = bc_value
+            if bc_value not in self.legal_bcs:
+                result.add(
+                    Violation(
+                        rule=E_UNKNOWN_BC,
+                        line=feature_line,
+                        bc=bc_value,
+                        detail=f"@bc value {bc_value!r} is not a known context",
+                    )
+                )
+
+        # -- @origin: exactly one, resolving to a known record --------------
+        origin_values = self._values_for(feature_tags, "origin")
+        if len(origin_values) == 0:
+            result.add(
+                Violation(
+                    rule=E_MISSING_ORIGIN,
+                    line=feature_line,
+                    detail="Feature carries no @origin provenance tag",
+                )
+            )
+        elif len(origin_values) > 1:
+            result.add(
+                Violation(
+                    rule=E_MULTI_ORIGIN,
+                    line=feature_line,
+                    detail=(
+                        f"Feature carries {len(origin_values)} @origin tags "
+                        "(expected exactly one)"
+                    ),
+                )
+            )
+        else:
+            (origin_value,) = origin_values
+            # Capture the feature-level provenance for the --json diagnostic,
+            # for the same reason feature_bc is captured above.
+            result.feature_origin = origin_value
+            if not self._origin_resolves(origin_value):
+                result.add(
+                    Violation(
+                        rule=E_UNKNOWN_ORIGIN,
+                        line=feature_line,
+                        origin=origin_value,
+                        detail=(
+                            f"@origin value {origin_value!r} resolves to no known "
+                            "decision record or lead bead id"
+                        ),
+                    )
+                )
+
+        # -- @service: OPTIONAL; when present must name a known service -----
+        # @service is optional (a Feature may carry none) and does NOT
+        # substitute for the mandatory @bc owner — the @bc rules above stand
+        # regardless of @service. A present @service value that is absent from
+        # the manifest's services list is rejected.
+        for service_value in self._values_for(feature_tags, "service"):
+            if service_value not in self.legal_services:
+                result.add(
+                    Violation(
+                        rule=E_UNKNOWN_SERVICE,
+                        line=feature_line,
+                        detail=(
+                            f"@service value {service_value!r} is not a known service"
+                        ),
+                    )
+                )
+
+        # -- @scenario_hash: per-scenario, present -------------------------
+        for child in feature.get("children", []):
+            scenario = child.get("scenario")
+            if scenario is None:
+                continue
+            self._check_scenario_hash(scenario, result)
+
+    @staticmethod
+    def _reconstruct_block(scenario: dict) -> str:
+        """The block-only body of a parsed scenario: ``Scenario: <name>`` plus
+        one ``<keyword> <text>`` line per step. This is the parser-path input
+        to ``compute_scenario_hash`` — the same canonical form the block-only
+        hash is defined over."""
+        lines = [f"Scenario: {scenario['name']}"]
+        for step in scenario.get("steps", []):
+            lines.append(f"{step['keyword'].strip()} {step['text']}")
+        return "\n".join(lines)
+
+    def _check_scenario_hash(self, scenario: dict, result: ValidationResult) -> None:
+        scenario_tags = self._tag_names(scenario)
+        title = scenario.get("name")
+        line = scenario.get("location", {}).get("line")
+        hash_values = self._values_for(scenario_tags, "scenario_hash")
+        if len(hash_values) == 0:
+            result.add(
+                Violation(
+                    rule=E_MISSING_HASH,
+                    line=line,
+                    scenario_title=title,
+                    detail=(
+                        f"scenario {title!r} carries no @scenario_hash tag"
+                    ),
+                )
+            )
+            return
+
+        # Compare the embedded hash against the block-only hash recomputed over
+        # the scenario's parser-path body. On mismatch the diagnostic names the
+        # scenario together with BOTH the embedded and the recomputed hash.
+        embedded = hash_values[0]
+        recomputed = compute_scenario_hash(self._reconstruct_block(scenario))
+        if embedded != recomputed:
+            result.add(
+                Violation(
+                    rule=E_HASH_MISMATCH,
+                    line=line,
+                    scenario_title=title,
+                    scenario_hash=embedded,
+                    detail=(
+                        f"scenario {title!r} @scenario_hash embedded={embedded} "
+                        f"but recomputed={recomputed}"
+                    ),
+                )
+            )
+
+    def validate_file(self, path: str) -> ValidationResult:
+        text = Path(path).read_text(encoding="utf-8")
+        return self.validate_text(text, file=path)
+
+
+# ----------------------------------------------------------------------------
+# Slice 2 — the --aggregate system-consistency gate (ADR-056 D8).
+#
+# Where ``Validator`` decides whether a SINGLE file is schema-valid, the
+# aggregate gate decides whether a whole CORPUS is system-consistent. It stays
+# RED while ANY of:
+#   - any file carries a per-file schema violation (reusing ``Validator``), OR
+#   - any Feature carries the @bc:unassigned transitional marker
+#     (surfaced as W_BC_UNASSIGNED), OR
+#   - any Feature carries the @origin:unresolved transitional marker
+#     (surfaced as W_ORIGIN_UNRESOLVED).
+# It is GREEN (exit 0) ONLY when every file is schema-valid AND zero
+# transitional markers remain.
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class AggregateFinding:
+    """One aggregate-level finding: a marker/code plus the file that carries it.
+
+    ``code`` is a stable string — either a per-file rule code (E_*) surfaced by
+    the reused per-file Validator, or one of the transitional aggregate markers
+    (W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED). ``file`` names the offending file so
+    a reader can locate it; ``detail`` carries an optional human note.
+    """
+
+    code: str
+    file: str
+    detail: Optional[str] = None
+
+    def render(self) -> str:
+        msg = f"{self.file}: {self.code}"
+        if self.detail:
+            msg = f"{msg}: {self.detail}"
+        return msg
+
+
+@dataclass
+class AggregateResult:
+    """The outcome of the aggregate gate over a corpus of scenario files.
+
+    ``findings`` collects every per-file violation code and transitional marker
+    across the corpus. ``ok`` is True iff the corpus is fully consistent (no
+    findings); ``exit_code`` is 0 iff ok.
+    """
+
+    findings: List[AggregateFinding] = field(default_factory=list)
+
+    def add(self, finding: AggregateFinding) -> None:
+        self.findings.append(finding)
+
+    @property
+    def ok(self) -> bool:
+        return not self.findings
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.ok else 1
+
+    def render(self) -> str:
+        return "\n".join(f.render() for f in self.findings)
+
+
+# The glob the aggregate gate harvests corpus files by. A corpus is a directory
+# tree of ``.feature`` files; the walk is recursive so a nested corpus layout is
+# gated as one whole.
+_FEATURE_GLOB = "*.feature"
+
+
+def validate_corpus(
+    corpus_dir: str,
+    *,
+    manifest_path: Optional[str] = None,
+    origin_roots: Optional[List[str]] = None,
+) -> AggregateResult:
+    """Run the aggregate system-consistency gate over a corpus directory.
+
+    Every ``.feature`` file under ``corpus_dir`` (recursively) is run through
+    the per-file ``Validator`` (so a per-file schema violation keeps the gate
+    RED and is reported with its stable E_ code and file), AND scanned for the
+    two transitional markers (@bc:unassigned / @origin:unresolved), which are
+    legal per-file placeholders but keep the aggregate gate RED as
+    W_BC_UNASSIGNED / W_ORIGIN_UNRESOLVED. The corpus is gated GREEN (exit 0)
+    only when it is entirely free of both per-file violations and transitional
+    markers.
+    """
+    result = AggregateResult()
+    # Deterministic order so the diagnostic is reproducible run-to-run.
+    files = sorted(Path(corpus_dir).rglob(_FEATURE_GLOB))
+    for path in files:
+        file_str = str(path)
+        validator = Validator(
+            manifest_path=manifest_path,
+            origin_roots=list(origin_roots) if origin_roots is not None else None,
+        )
+        file_result = validator.validate_file(file_str)
+
+        # Per-file schema violations keep the gate RED and are surfaced with
+        # their stable rule code and the offending file.
+        for violation in file_result.violations:
+            result.add(
+                AggregateFinding(
+                    code=violation.rule,
+                    file=file_str,
+                    detail=violation.detail,
+                )
+            )
+
+        # Transitional markers: @bc:unassigned / @origin:unresolved are LEGAL
+        # per-file placeholders (they produced no violation above) but keep the
+        # aggregate gate RED. The per-file Validator captured the sole @bc /
+        # @origin value on the result during tag resolution, so reuse those
+        # rather than re-parsing.
+        if file_result.feature_bc == UNASSIGNED_TOKEN:
+            result.add(
+                AggregateFinding(
+                    code=W_BC_UNASSIGNED,
+                    file=file_str,
+                    detail=(
+                        "Feature carries the @bc:unassigned transitional marker "
+                        "(owner not yet assigned)"
+                    ),
+                )
+            )
+        if file_result.feature_origin == ORIGIN_UNRESOLVED_TOKEN:
+            result.add(
+                AggregateFinding(
+                    code=W_ORIGIN_UNRESOLVED,
+                    file=file_str,
+                    detail=(
+                        "Feature carries the @origin:unresolved transitional "
+                        "marker (provenance not yet resolved)"
+                    ),
+                )
+            )
+    return result

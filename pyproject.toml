@@ -9,7 +9,15 @@ description = "Scenario domain logic — canonicalization and hashing of Gherkin
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "David Stenglein"}]
-dependencies = []
+# gherkin-official and pyyaml are RUNTIME dependencies: `scenarios validate`
+# parses feature files with the off-the-shelf @cucumber/gherkin port at
+# runtime (ADR-056), and the @bc/@origin resolution roots (later slices) read
+# a bc-manifest.yaml. They are kept in `dev` too so the existing pinned test
+# extras keep installing them for the test suite.
+dependencies = [
+    "gherkin-official",
+    "pyyaml",
+]
 
 [project.optional-dependencies]
 dev = [

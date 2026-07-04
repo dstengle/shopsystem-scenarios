@@ -39,19 +39,33 @@ Subcommands:
         them to JOURNAL-FILE in the journal format (one block-only canonical
         hash per line). Idempotent: re-running over the same tree leaves an
         identical entry set hash-for-hash.
+    validate FILE [--manifest PATH] [--origin-root DIR ...] [--json]
+        Validates a scenario (.feature) FILE against the ADR-056 schema.
+        Collects a list of violations; exits 0 iff none, non-zero otherwise
+        (each violation printed to stderr naming the file and its stable rule
+        code). --manifest / --origin-root inject the @bc/@origin resolution
+        roots (defaulting to conventional repo locations). --json emits, on a
+        violation, a machine-readable JSON diagnostic to stdout (file / line /
+        scenario_title / scenario_hash / bc / origin plus a violations array of
+        stable rule codes) instead of the human diagnostic on stderr.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from scenarios.feature import iter_scenarios, iter_tags
 from scenarios.hash import compute_scenario_hash
+from scenarios.outstanding import parse_then_block_only_hash
 from scenarios.journal import (
     harvest_features_tree,
     is_recorded,
     write_journal_entries,
 )
+from scenarios.validate import Validator, validate_corpus
+from scenarios.create import create_feature_text
+from scenarios.consolidate import consolidate_bare_files
 
 
 def _read_scenario_stdin(command: str) -> str | None:
@@ -77,7 +91,14 @@ def _cmd_hash(args: argparse.Namespace) -> int:
     gherkin_text = _read_scenario_stdin("hash")
     if gherkin_text is None:
         return 2
-    print(compute_scenario_hash(gherkin_text))
+    # Parse-then-hash reconcile (ADR-056 D5): the raw-stdin `hash` path parses
+    # the scenario block out and hashes it BLOCK-ONLY, so its output equals the
+    # parser path's (`list`/`count`) block-only hash for the scenario and is
+    # insensitive to a surrounding @-tag line, comment lines, and a `Feature:`
+    # declaration. This deprecates the old `awk '/Scenario:/{p=1} p' |
+    # scenarios hash` recompute recipe — pipe the whole scenario (or feature)
+    # text to `scenarios hash` directly.
+    print(parse_then_block_only_hash(gherkin_text))
     return 0
 
 
@@ -161,6 +182,92 @@ def _cmd_journal_rebuild(args: argparse.Namespace) -> int:
     write_journal_entries(
         args.journal_file, harvest_features_tree(args.features_tree)
     )
+    return 0
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    # --aggregate switches the positional FILE arg to a CORPUS DIRECTORY and
+    # runs the system-consistency gate (ADR-056 D8) over every .feature file
+    # under it: the gate stays non-zero while ANY file is non-conformant (a
+    # per-file schema violation, reusing the per-file Validator) OR ANY Feature
+    # carries a transitional marker (@bc:unassigned -> W_BC_UNASSIGNED,
+    # @origin:unresolved -> W_ORIGIN_UNRESOLVED), and exits 0 only when the
+    # corpus is entirely clean of both.
+    if args.aggregate:
+        return _cmd_validate_aggregate(args)
+
+    # Validate one scenario file against the ADR-056 schema. Resolution roots
+    # (--manifest / --origin-root) are injectable so slice 1b's @bc/@origin
+    # legal-set lookups plug in without a CLI refactor; this foundation slice
+    # accepts them but does not yet resolve against them. A run collects a list
+    # of violations; exit code is 0 iff empty, non-zero (each violation printed
+    # to stderr, naming the file and rule code) otherwise.
+    validator = Validator(
+        manifest_path=args.manifest,
+        origin_roots=args.origin_root or None,
+    )
+    result = validator.validate_file(args.file)
+    if not result.ok:
+        if args.json:
+            # Machine-readable diagnostic on STDOUT: a JSON object naming the
+            # offending file, its line / scenario_title / scenario_hash / bc /
+            # origin context, and a violations array of stable rule codes. The
+            # human (non-JSON) diagnostic stays on stderr and is unchanged.
+            print(json.dumps(result.to_json_diagnostic()))
+        else:
+            print(result.render(), file=sys.stderr)
+    return result.exit_code
+
+
+def _cmd_validate_aggregate(args: argparse.Namespace) -> int:
+    # Run the aggregate system-consistency gate over the corpus directory named
+    # by the positional arg. Exit code is 0 iff the corpus is entirely free of
+    # per-file schema violations AND transitional markers; otherwise non-zero,
+    # with each finding (a per-file E_ code or a transitional W_ marker) printed
+    # to stderr naming the offending file.
+    result = validate_corpus(
+        args.file,
+        manifest_path=args.manifest,
+        origin_roots=args.origin_root or None,
+    )
+    if not result.ok:
+        print(result.render(), file=sys.stderr)
+    return result.exit_code
+
+
+def _cmd_create(args: argparse.Namespace) -> int:
+    # Emit a Feature-headed grouped Gherkin file (ADR-056 D12) from one or
+    # more bare scenario-body FILES plus a target @bc / @origin. Each body
+    # file is a bare scenario block (Scenario: keyword + step lines, no tags);
+    # the helper wraps them into one Feature carrying the feature-level
+    # @bc/@origin and tags each scenario with its parser-path block-only
+    # @scenario_hash, so the output passes `scenarios validate` when the
+    # chosen @bc/@origin are legal.
+    bodies = [
+        open(path, encoding="utf-8").read() for path in args.body_file
+    ]
+    text = create_feature_text(
+        feature_name=args.feature_name,
+        bc=args.bc,
+        origin=args.origin,
+        scenario_bodies=bodies,
+    )
+    sys.stdout.write(text)
+    return 0
+
+
+def _cmd_consolidate(args: argparse.Namespace) -> int:
+    # Merge two-or-more BARE single-scenario FILES into one Feature-headed
+    # grouped file (ADR-056 D12) with an inherited @bc/@origin. Hash-preserving:
+    # each scenario's @scenario_hash after consolidation equals its
+    # pre-consolidation block-only hash (the body is unchanged).
+    text = consolidate_bare_files(
+        args.bare_file,
+        feature_name=args.feature_name,
+        bc=args.bc,
+        origin=args.origin,
+    )
+    sys.stdout.write(text)
     return 0
 
 
@@ -268,6 +375,123 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to the journal file to write (one block-only hash per line)",
     )
     journal_rebuild_cmd.set_defaults(func=_cmd_journal_rebuild)
+
+    validate_cmd = sub.add_parser(
+        "validate",
+        help="validate a scenario file against the ADR-056 schema",
+    )
+    validate_cmd.add_argument(
+        "file",
+        help="path to the scenario (.feature) file to validate",
+    )
+    validate_cmd.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "path to the bc-manifest.yaml the @bc/@service legal set resolves "
+            "against (defaults to the conventional repo location; injectable "
+            "so tests can supply a fixture)"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--origin-root",
+        action="append",
+        default=None,
+        help=(
+            "directory the @origin legal set resolves against (repeatable; "
+            "defaults to adr/ pdr/ briefs/; injectable so tests can supply "
+            "fixtures)"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "on a violation, emit a machine-readable JSON diagnostic to stdout "
+            "(file / line / scenario_title / scenario_hash / bc / origin plus a "
+            "violations array of stable rule codes) instead of the human "
+            "diagnostic on stderr"
+        ),
+    )
+    validate_cmd.add_argument(
+        "--aggregate",
+        action="store_true",
+        help=(
+            "treat the positional argument as a CORPUS DIRECTORY and run the "
+            "system-consistency gate (ADR-056 D8) over every .feature file under "
+            "it: exit non-zero while any file is non-conformant (a per-file "
+            "schema violation) or any Feature carries a transitional marker "
+            "(@bc:unassigned -> W_BC_UNASSIGNED, @origin:unresolved -> "
+            "W_ORIGIN_UNRESOLVED); exit 0 only when the corpus is entirely clean"
+        ),
+    )
+    validate_cmd.set_defaults(func=_cmd_validate)
+
+    create_cmd = sub.add_parser(
+        "create",
+        help=(
+            "emit a Feature-headed grouped scenario file from bare scenario-body "
+            "files plus a target @bc/@origin (output passes `scenarios validate`)"
+        ),
+    )
+    create_cmd.add_argument(
+        "--feature-name",
+        required=True,
+        help="the Feature: name for the emitted grouped file",
+    )
+    create_cmd.add_argument(
+        "--bc",
+        required=True,
+        help="the feature-level @bc owner tag value (a known context)",
+    )
+    create_cmd.add_argument(
+        "--origin",
+        required=True,
+        help="the feature-level @origin provenance tag value (a resolving ref)",
+    )
+    create_cmd.add_argument(
+        "body_file",
+        nargs="+",
+        help=(
+            "one or more bare scenario-body files (Scenario: keyword + steps, "
+            "no tags); each is grouped under the emitted Feature and tagged with "
+            "its parser-path block-only @scenario_hash"
+        ),
+    )
+    create_cmd.set_defaults(func=_cmd_create)
+
+    consolidate_cmd = sub.add_parser(
+        "consolidate",
+        help=(
+            "merge bare single-scenario files into one Feature-headed grouped "
+            "file with inherited @bc/@origin (hash-preserving)"
+        ),
+    )
+    consolidate_cmd.add_argument(
+        "--feature-name",
+        required=True,
+        help="the Feature: name for the consolidated grouped file",
+    )
+    consolidate_cmd.add_argument(
+        "--bc",
+        required=True,
+        help="the inherited feature-level @bc owner tag value",
+    )
+    consolidate_cmd.add_argument(
+        "--origin",
+        required=True,
+        help="the inherited feature-level @origin provenance tag value",
+    )
+    consolidate_cmd.add_argument(
+        "bare_file",
+        nargs="+",
+        help=(
+            "two or more bare single-scenario files to merge; each scenario's "
+            "@scenario_hash is preserved (equals its pre-consolidation "
+            "block-only hash)"
+        ),
+    )
+    consolidate_cmd.set_defaults(func=_cmd_consolidate)
 
     return parser
 
