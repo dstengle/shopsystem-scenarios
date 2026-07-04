@@ -417,6 +417,23 @@ class Validator:
                     )
                 )
 
+        # -- @service: OPTIONAL; when present must name a known service -----
+        # @service is optional (a Feature may carry none) and does NOT
+        # substitute for the mandatory @bc owner — the @bc rules above stand
+        # regardless of @service. A present @service value that is absent from
+        # the manifest's services list is rejected.
+        for service_value in self._values_for(feature_tags, "service"):
+            if service_value not in self.legal_services:
+                result.add(
+                    Violation(
+                        rule=E_UNKNOWN_SERVICE,
+                        line=feature_line,
+                        detail=(
+                            f"@service value {service_value!r} is not a known service"
+                        ),
+                    )
+                )
+
         # -- @scenario_hash: per-scenario, present -------------------------
         for child in feature.get("children", []):
             scenario = child.get("scenario")
