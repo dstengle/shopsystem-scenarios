@@ -236,6 +236,7 @@ class Validator:
         *,
         manifest_path: Optional[str] = None,
         origin_roots: Optional[List[str]] = None,
+        origin_index: Optional[str] = None,
     ) -> None:
         self.manifest_path = (
             manifest_path if manifest_path is not None else DEFAULT_MANIFEST_PATH
@@ -245,29 +246,74 @@ class Validator:
             if origin_roots is not None
             else list(DEFAULT_ORIGIN_ROOTS)
         )
+        # The optional generated origin-index (one identifier per line) the
+        # @origin legal set resolves against by MEMBERSHIP. Real ADR files are
+        # ``NNN-slug.md`` and a BC container carries no ``adr/`` dir (ADR-018),
+        # so the dir-scan path misses a real ``@origin:adr-056``; the index is
+        # the real-data resolution path, with the dir-scan retained as a
+        # fixture fallback. ``None`` means no index configured (dir-scan +
+        # lead-bead rules only).
+        self.origin_index = origin_index
         self._legal_bcs: Optional[frozenset] = None
         self._legal_services: Optional[frozenset] = None
+        self._origin_ids: Optional[frozenset] = None
 
     # -- manifest-backed legal sets -----------------------------------------
+
+    @staticmethod
+    def _manifest_names(entries: object) -> List[str]:
+        """Name-extract a manifest ``bcs:``/``services:`` section.
+
+        The real ``bc-manifest.yaml`` carries DICT entries
+        (``- name: <token>`` with optional ``remote``/``role``/``status``/
+        ``deferred_to`` keys), while the legacy shape carries bare strings.
+        Accept BOTH: a dict entry contributes its ``name`` value (extra keys
+        are tolerated and ignored; a provisional entry's name IS a legal
+        value), a bare string contributes itself, and any other entry shape
+        (including a dict missing its ``name`` key) is skipped rather than
+        crashing the run. A non-list section yields no names.
+        """
+        names: List[str] = []
+        if not isinstance(entries, list):
+            return names
+        for entry in entries:
+            if isinstance(entry, str):
+                names.append(entry)
+            elif isinstance(entry, dict):
+                name = entry.get("name")
+                if isinstance(name, str):
+                    names.append(name)
+            # Any other entry shape (nameless dict, int, None) is skipped.
+        return names
 
     def _load_manifest(self) -> None:
         """Load the bc-manifest.yaml bcs/services lists (once, lazily).
 
-        Legal @bc = the manifest's ``bcs`` list PLUS the protocol tokens
+        Legal @bc = the manifest's ``bcs`` names PLUS the protocol tokens
         (product / unassigned). Legal @service = the manifest's ``services``
-        list. A missing manifest yields empty registries (the tokens still
-        stand for @bc) rather than crashing the run.
+        names. Entries may be dict-shaped (real corpus) or bare strings
+        (legacy); ``_manifest_names`` name-extracts either. A missing,
+        empty, or non-dict/garbage manifest yields empty registries (the
+        tokens still stand for @bc) rather than crashing the run.
         """
         if self._legal_bcs is not None:
             return
         data: dict = {}
         path = Path(self.manifest_path)
         if path.exists():
-            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            # A malformed manifest must degrade to empty registries with a
+            # clean fallback rather than crash the run: catch both an
+            # unparseable YAML document (yaml.YAMLError) and an unreadable file
+            # (OSError). A parsed-but-non-dict top level (a bare list, a
+            # scalar) is handled by the isinstance check below.
+            try:
+                loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (yaml.YAMLError, OSError):
+                loaded = None
             if isinstance(loaded, dict):
                 data = loaded
-        bcs = data.get("bcs") or []
-        services = data.get("services") or []
+        bcs = self._manifest_names(data.get("bcs"))
+        services = self._manifest_names(data.get("services"))
         self._legal_bcs = frozenset(bcs) | _EXTRA_LEGAL_BCS
         self._legal_services = frozenset(services)
 
@@ -285,13 +331,41 @@ class Validator:
 
     # -- origin resolution --------------------------------------------------
 
+    def _load_origin_index(self) -> frozenset:
+        """Load the generated origin-index (once, lazily).
+
+        The index is a plain identifier list — one id per line (e.g.
+        ``adr-056``, ``pdr-003``, ``brief-foo``). Blank and whitespace-only
+        lines are ignored. A missing, empty, or unreadable index file yields
+        an empty membership set (the other resolution paths still apply)
+        rather than crashing the run. When no ``--origin-index`` is
+        configured the set is empty.
+        """
+        if self._origin_ids is not None:
+            return self._origin_ids
+        ids: set = set()
+        if self.origin_index is not None:
+            path = Path(self.origin_index)
+            if path.exists():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    text = ""
+                for line in text.splitlines():
+                    ident = line.strip()
+                    if ident:
+                        ids.add(ident)
+        self._origin_ids = frozenset(ids)
+        return self._origin_ids
+
     def _origin_resolves(self, ref: str) -> bool:
         """True iff ``ref`` names a known decision record or a lead bead id.
 
-        A ref resolves when a file named ``<ref>.md`` (or ``<ref>``) exists
-        under any configured origin root (adr/ pdr/ briefs/), OR when it is
-        shaped like a lead bead id, OR when it is the ``unresolved`` placeholder
-        sentinel. Otherwise the @origin is unknown.
+        A ref resolves when it is a MEMBER of the configured ``--origin-index``
+        identifier list, OR when a file named ``<ref>.md`` (or ``<ref>``)
+        exists under any configured origin root (adr/ pdr/ briefs/ — a fixture
+        fallback), OR when it is shaped like a lead bead id, OR when it is the
+        ``unresolved`` placeholder sentinel. Otherwise the @origin is unknown.
         """
         # The ``unresolved`` placeholder is a LEGAL per-file @origin value: it
         # stands for provenance that has not yet been assigned (ADR-056 D1/D10),
@@ -299,6 +373,13 @@ class Validator:
         # --aggregate gate is what surfaces it (as W_ORIGIN_UNRESOLVED) and forces
         # it to zero; the per-file check treats it as resolving.
         if ref == ORIGIN_UNRESOLVED_TOKEN:
+            return True
+        # Real-data resolution path (GAP-2): membership in the generated
+        # origin-index identifier list. Real ADR files are ``NNN-slug.md`` and
+        # a BC container carries no ``adr/`` dir (ADR-018), so the dir-scan
+        # below misses a real ``@origin:adr-056``; the index is how the real
+        # corpus resolves provenance.
+        if ref in self._load_origin_index():
             return True
         # An origin root may be named either as a decision-record directory
         # itself (the ``adr``/``pdr``/``briefs`` default model) or as a parent
@@ -643,6 +724,7 @@ def validate_corpus(
     *,
     manifest_path: Optional[str] = None,
     origin_roots: Optional[List[str]] = None,
+    origin_index: Optional[str] = None,
 ) -> AggregateResult:
     """Run the aggregate system-consistency gate over a corpus directory.
 
@@ -663,6 +745,7 @@ def validate_corpus(
         validator = Validator(
             manifest_path=manifest_path,
             origin_roots=list(origin_roots) if origin_roots is not None else None,
+            origin_index=origin_index,
         )
         file_result = validator.validate_file(file_str)
 

@@ -1,19 +1,29 @@
 # bc-manifest.yaml — authoritative legal-value sets for `scenarios validate`
 # (ADR-056 D10). Repo-local so the command works against the real corpus.
 #
-# `bcs` — the Bounded Context owner tokens a Feature's @bc may name. The full
-# legal @bc set is this list PLUS the lead product token (`shopsystem-product`)
-# PLUS the sentinel `unassigned`; those two are protocol tokens, not BCs, and
-# are encoded in the validator rather than here so this file stays a pure BC
-# registry.
+# `bcs` — the Bounded Context owner tokens a Feature's @bc may name. Entries
+# are DICT-shaped (the real corpus shape): `name` is the owner token; the
+# optional `remote` / `role` / `status` / `deferred_to` keys carry registry
+# metadata and are tolerated (ignored) by the validator's name-extraction.
+# A `status: provisional` entry's name IS a legal @bc value. Bare-string
+# entries are ALSO accepted (legacy shape) so this file may mix shapes.
+# The full legal @bc set is these names PLUS the lead product token
+# (`shopsystem-product`) PLUS the sentinel `unassigned`; those two are
+# protocol tokens, not BCs, and are encoded in the validator rather than here
+# so this file stays a pure BC registry.
 #
-# `services` — the shared-service tokens a Feature's optional @service may name.
+# `services` — the shared-service tokens a Feature's optional @service may
+# name (same dict-or-string entry shape as `bcs`).
 bcs:
-  - shopsystem-messaging
-  - shopsystem-scenarios
-  - shopsystem-templates
-  - shopsystem-bc-launcher
+  - name: shopsystem-messaging
+    role: bc
+  - name: shopsystem-scenarios
+    role: bc
+  - name: shopsystem-templates
+    role: bc
+  - name: shopsystem-bc-launcher
+    role: bc
 
 services:
-  - postgres
-  - agent-vault-broker
+  - name: postgres
+  - name: agent-vault-broker
