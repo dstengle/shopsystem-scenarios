@@ -349,6 +349,17 @@ class Validator:
                     detail="Feature carries no @bc owner tag",
                 )
             )
+        elif len(bc_values) > 1:
+            result.add(
+                Violation(
+                    rule=E_MULTI_BC,
+                    line=feature_line,
+                    detail=(
+                        f"Feature carries {len(bc_values)} @bc tags "
+                        "(expected exactly one)"
+                    ),
+                )
+            )
 
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
