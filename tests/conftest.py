@@ -3156,3 +3156,146 @@ def then_validate_emitted_exits_zero(context: dict) -> None:
         f"got {result.returncode}\nstdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
+
+
+# =======================================================================
+# scenarios-validate-and-schema.feature (slice 4) — the consolidate helper
+# (ADR-056 D12).
+#
+# `scenarios consolidate` merges two-or-more BARE single-scenario files
+# (each a Scenario: keyword + steps, no enclosing Feature) into ONE
+# Feature-headed file grouping all scenarios under a single Feature with an
+# inherited @bc/@origin. It is HASH-PRESERVING: because the block-only hash
+# drops all tags and the Feature line, a scenario's parser-path block-only
+# hash is invariant whether it stands alone or is grouped — so each
+# scenario's @scenario_hash in the consolidated file equals that scenario's
+# hash BEFORE consolidation. The step asserts that equality against the
+# pre-consolidation hashes captured from the bare files.
+# =======================================================================
+
+
+_CONSOLIDATE_BODY_A = (
+    "Scenario: a first bare scenario to consolidate\n"
+    "    Given a standalone precondition A\n"
+    "    When a standalone action A occurs\n"
+    "    Then a standalone outcome A holds"
+)
+_CONSOLIDATE_BODY_B = (
+    "Scenario: a second bare scenario to consolidate\n"
+    "    Given a standalone precondition B\n"
+    "    When a standalone action B occurs\n"
+    "    Then a standalone outcome B holds"
+)
+
+
+@given(
+    "two bare single-scenario files, each with a known parser-path "
+    "block-only hash"
+)
+def given_two_bare_scenario_files(context: dict, tmp_path) -> None:
+    from scenarios.outstanding import compute_block_only_hash
+
+    bodies = [_CONSOLIDATE_BODY_A, _CONSOLIDATE_BODY_B]
+    # Pre-consolidation hashes: each bare file's parser-path block-only hash,
+    # captured BEFORE consolidation so the Then can prove preservation.
+    pre_hashes = [compute_block_only_hash(b) for b in bodies]
+    assert pre_hashes[0] != pre_hashes[1], (
+        "fixture invariant: the two scenarios' block-only hashes collided"
+    )
+    paths = []
+    for i, body in enumerate(bodies):
+        # A BARE single-scenario file: the Scenario: block alone, no Feature
+        # line and no tags. This is exactly the input the consolidate helper
+        # must group under one Feature.
+        p = tmp_path / f"bare_{i}.feature"
+        p.write_text(body + "\n", encoding="utf-8")
+        paths.append(p)
+    context["consolidate_paths"] = paths
+    context["consolidate_pre_hashes"] = pre_hashes
+    context["consolidate_bc"] = "shopsystem-scenarios"
+    context["consolidate_origin"] = "adr-056"
+    context["consolidate_feature_name"] = "a consolidated grouped feature"
+
+
+@when(
+    "I run the scenarios consolidate helper to merge them into one "
+    "Feature-headed file with inherited @bc and @origin"
+)
+def when_run_consolidate_helper(context: dict) -> None:
+    from scenarios.consolidate import consolidate_bare_files
+
+    text = consolidate_bare_files(
+        [str(p) for p in context["consolidate_paths"]],
+        feature_name=context["consolidate_feature_name"],
+        bc=context["consolidate_bc"],
+        origin=context["consolidate_origin"],
+    )
+    context["consolidate_text"] = text
+
+
+@then("the resulting file groups both scenarios under exactly one Feature")
+def then_consolidated_one_feature(context: dict) -> None:
+    from scenarios.outstanding import _iter_scenario_blocks
+
+    text = context["consolidate_text"]
+    feature_lines = [
+        line for line in text.splitlines() if line.strip().startswith("Feature:")
+    ]
+    assert len(feature_lines) == 1, (
+        f"expected exactly one Feature: line; got {len(feature_lines)}:\n{text}"
+    )
+    blocks = list(_iter_scenario_blocks(text))
+    assert len(blocks) == len(context["consolidate_paths"]), (
+        f"expected {len(context['consolidate_paths'])} scenarios grouped under "
+        f"the Feature; got {len(blocks)}:\n{text}"
+    )
+
+
+@then(
+    "each scenario's @scenario_hash in the consolidated file equals that "
+    "scenario's hash before consolidation"
+)
+def then_consolidated_hashes_preserved(context: dict) -> None:
+    import re
+
+    from scenarios.outstanding import (
+        _iter_scenario_blocks,
+        compute_block_only_hash,
+    )
+
+    text = context["consolidate_text"]
+    lines = text.splitlines()
+    scenario_idx = [
+        i for i, ln in enumerate(lines) if ln.strip().startswith("Scenario:")
+    ]
+    blocks = list(_iter_scenario_blocks(text))
+    pre_hashes = set(context["consolidate_pre_hashes"])
+    seen: list[str] = []
+    for pos, block in zip(scenario_idx, blocks):
+        # The @scenario_hash embedded in the consolidated file for this
+        # scenario.
+        j = pos - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        assert j >= 0, f"scenario at line {pos} has no preceding tag line:\n{text}"
+        embedded = re.findall(r"@scenario_hash:([0-9a-f]{16})", lines[j].strip())
+        assert len(embedded) == 1, (
+            f"expected exactly one @scenario_hash tag for scenario at line "
+            f"{pos}; got {embedded!r}"
+        )
+        # Hash-preserving: the embedded hash equals the scenario's own
+        # block-only hash (the body is unchanged) AND is one of the
+        # pre-consolidation hashes captured from the bare files.
+        assert embedded[0] == compute_block_only_hash(block), (
+            f"embedded @scenario_hash {embedded[0]!r} != block-only hash of the "
+            f"consolidated body:\n{block}"
+        )
+        assert embedded[0] in pre_hashes, (
+            f"embedded @scenario_hash {embedded[0]!r} is not one of the "
+            f"pre-consolidation hashes {pre_hashes!r} — not hash-preserving"
+        )
+        seen.append(embedded[0])
+    assert set(seen) == pre_hashes, (
+        f"consolidated file's @scenario_hash set {set(seen)!r} != the "
+        f"pre-consolidation hash set {pre_hashes!r}"
+    )
