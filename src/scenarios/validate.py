@@ -190,11 +190,23 @@ class Validator:
         # E_NO_FEATURE diagnostic into a generic E_GHERKIN_PARSE. The line scan
         # recovers the schema-level cardinality diagnostic; a single-Feature
         # file still goes to the parser below for the genuine parse path.
-        if self._count_feature_lines(text) == 0:
+        feature_count = self._count_feature_lines(text)
+        if feature_count == 0:
             result.add(
                 Violation(
                     rule=E_NO_FEATURE,
                     detail="file declares no Feature keyword",
+                )
+            )
+            return result
+        if feature_count > 1:
+            result.add(
+                Violation(
+                    rule=E_MULTI_FEATURE,
+                    detail=(
+                        f"file declares {feature_count} Feature keywords "
+                        "(expected exactly one)"
+                    ),
                 )
             )
             return result
