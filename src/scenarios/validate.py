@@ -453,6 +453,25 @@ class Validator:
             )
             return
 
+        # Compare the embedded hash against the block-only hash recomputed over
+        # the scenario's parser-path body. On mismatch the diagnostic names the
+        # scenario together with BOTH the embedded and the recomputed hash.
+        embedded = hash_values[0]
+        recomputed = compute_scenario_hash(self._reconstruct_block(scenario))
+        if embedded != recomputed:
+            result.add(
+                Violation(
+                    rule=E_HASH_MISMATCH,
+                    line=line,
+                    scenario_title=title,
+                    scenario_hash=embedded,
+                    detail=(
+                        f"scenario {title!r} @scenario_hash embedded={embedded} "
+                        f"but recomputed={recomputed}"
+                    ),
+                )
+            )
+
     def validate_file(self, path: str) -> ValidationResult:
         text = Path(path).read_text(encoding="utf-8")
         return self.validate_text(text, file=path)
