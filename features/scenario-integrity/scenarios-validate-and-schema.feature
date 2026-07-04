@@ -58,3 +58,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending feature and the rule code E_MISSING_ORIGIN
+
+  @scenario_hash:dd1c1ea9904cf7f7 @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A feature carrying more than one @origin tag is rejected with E_MULTI_ORIGIN
+    Given a scenario file whose Feature carries two @origin tags
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending feature and the rule code E_MULTI_ORIGIN

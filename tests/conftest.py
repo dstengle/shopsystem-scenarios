@@ -2314,3 +2314,23 @@ def given_feature_no_origin(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=text)
     )
+
+
+# -- E_MULTI_ORIGIN (scenario 5) ----------------------------------------
+
+
+@given("a scenario file whose Feature carries two @origin tags")
+def given_feature_two_origin(context: dict, tmp_path) -> None:
+    # Two @origin tags (both resolving to a real fixture record, so the sole
+    # defect is the cardinality). @bc is present + valid.
+    text = build_feature_text(
+        feature_tags=(
+            "@bc:shopsystem-scenarios",
+            "@origin:adr-056",
+            "@origin:adr-056",
+        )
+    )
+    assert text.count("@origin:") == 2, "fixture must carry two @origin tags"
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
