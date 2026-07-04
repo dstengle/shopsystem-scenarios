@@ -72,3 +72,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending @origin value and the rule code E_UNKNOWN_ORIGIN
+
+  @scenario_hash:7f0e2a957bbb8d7e @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A scenario missing its @scenario_hash tag is rejected with E_MISSING_HASH
+    Given a scenario file with a scenario that carries no @scenario_hash tag
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending scenario and the rule code E_MISSING_HASH

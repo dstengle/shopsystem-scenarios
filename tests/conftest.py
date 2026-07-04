@@ -2373,3 +2373,26 @@ def then_diagnostic_names_origin_value_and_rule(context: dict, rule_code: str) -
     assert value in stderr, (
         f"expected offending @origin value {value!r} named in diagnostic; got:\n{stderr}"
     )
+
+
+# -- E_MISSING_HASH (scenario 7) ----------------------------------------
+
+
+_MISSING_HASH_TITLE = "A scenario carrying no hash tag"
+
+
+@given("a scenario file with a scenario that carries no @scenario_hash tag")
+def given_scenario_no_hash(context: dict, tmp_path) -> None:
+    # A conformant Feature (valid @bc/@origin) whose single scenario carries NO
+    # @scenario_hash tag (hash_tag=None). The sole defect is the missing hash.
+    block = ScenarioBlock(
+        _MISSING_HASH_TITLE,
+        ["Given a precondition", "When an action occurs", "Then an outcome"],
+        hash_tag=None,
+    )
+    text = build_feature_text(scenarios=[block])
+    assert "@scenario_hash:" not in text, "fixture scenario must carry no hash tag"
+    context["offending_scenario_title"] = _MISSING_HASH_TITLE
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )
