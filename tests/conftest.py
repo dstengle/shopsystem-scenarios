@@ -2241,3 +2241,23 @@ def given_feature_no_bc(context: dict, tmp_path) -> None:
     context["validate_target"] = str(
         write_feature_file(tmp_path, raw_text=text)
     )
+
+
+# -- E_MULTI_BC (scenario 2) --------------------------------------------
+
+
+@given("a scenario file whose Feature carries two @bc tags")
+def given_feature_two_bc(context: dict, tmp_path) -> None:
+    # A Feature carrying two @bc tags (both known contexts, so the sole defect
+    # is the cardinality, not an unknown value). @origin is present + valid.
+    text = build_feature_text(
+        feature_tags=(
+            "@bc:shopsystem-scenarios",
+            "@bc:shopsystem-messaging",
+            "@origin:adr-056",
+        )
+    )
+    assert text.count("@bc:") == 2, "fixture must carry two @bc tags"
+    context["validate_target"] = str(
+        write_feature_file(tmp_path, raw_text=text)
+    )

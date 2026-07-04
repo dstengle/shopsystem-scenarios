@@ -37,3 +37,10 @@ Feature: scenarios validate — schema validation subsystem (ADR-056)
     When I run "scenarios validate" against the file
     Then the exit code is non-zero
     And the diagnostic names the offending feature and the rule code E_MISSING_BC
+
+  @scenario_hash:b869b8a335639ddd @bc:shopsystem-scenarios @origin:adr-056
+  Scenario: A feature carrying more than one @bc tag is rejected with E_MULTI_BC
+    Given a scenario file whose Feature carries two @bc tags
+    When I run "scenarios validate" against the file
+    Then the exit code is non-zero
+    And the diagnostic names the offending feature and the rule code E_MULTI_BC
